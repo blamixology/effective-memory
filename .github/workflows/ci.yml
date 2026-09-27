@@ -23,3 +23,67 @@ jobs:
 
       - name: Test
         run: pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install
+        run: pip install -e ".[dev,web]"
+
+      - name: Lint (ruff)
+        run: ruff check src tests
+
+      - name: Type check (mypy)
+        run: mypy src/effective_memory
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t effective-memory:ci .
+
+      - name: Run container
+        run: |
+          docker run -d --name emem-ci -p 8000:8000 \
+            -e EFFECTIVE_MEMORY_API_KEY=ci-test-key \
+            effective-memory:ci
+
+      - name: Wait for health check
+        run: |
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format='{{.State.Health.Status}}' emem-ci 2>/dev/null || echo "starting")
+            if [ "$status" = "healthy" ]; then
+              echo "container is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "container never became healthy"
+          docker logs emem-ci
+          exit 1
+
+      - name: Smoke test the API
+        run: |
+          curl -sf http://localhost:8000/healthz
+          curl -sf -X POST http://localhost:8000/api/memories \
+            -H 'X-API-Key: ci-test-key' -H 'Content-Type: application/json' \
+            -d '{"content":"ci smoke test"}'
+          curl -sf http://localhost:8000/api/stats -H 'X-API-Key: ci-test-key' | grep -q '"total":1'
+          # unauthenticated request must be rejected
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/stats)" = "401"
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker logs emem-ci
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f emem-ci || true

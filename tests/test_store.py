@@ -1,5 +1,3 @@
-import math
-
 import pytest
 
 from effective_memory import MemoryStore
@@ -96,7 +94,7 @@ def test_retention_decays_over_time(store, clock):
 
 
 def test_review_due_surfaces_decayed_memories(store, clock):
-    fresh_id = store.add("fresh memory")
+    store.add("fresh memory")
     stale_id = store.add("stale memory")
     clock.advance(90 * 24 * 3600)
 

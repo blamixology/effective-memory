@@ -18,8 +18,8 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional, Sequence
 
 from .decay import DEFAULT_HALF_LIFE_SECONDS, retention
 from .embeddings import Embedder, HashingEmbedder, cosine_similarity
@@ -106,7 +106,7 @@ def _query_tokens(query: str) -> list[str]:
     return seen
 
 
-def _keyword_score(tokens: list[str], content: str) -> float:
+def _keyword_score(tokens: Sequence[str], content: str) -> float:
     if not tokens:
         return 0.0
     content_lower = content.lower()
@@ -137,19 +137,20 @@ class MemoryStore:
         self._vector_index_overfetch = vector_index_overfetch
         self._vector_index: Optional[VectorIndex] = None
         if vector_index:
-            self._vector_index = VectorIndex(self._conn, dims=self.embedder.dims)
-            self._sync_vector_index()
+            index = VectorIndex(self._conn, dims=self.embedder.dims)
+            self._sync_vector_index(index)
+            self._vector_index = index
 
-    def _sync_vector_index(self) -> None:
+    def _sync_vector_index(self, index: VectorIndex) -> None:
         """Rebuild the vector index from `memories` if it's out of sync --
         e.g. it was just enabled against a store that already has data.
         """
         active_count = self._conn.execute("SELECT COUNT(*) FROM memories WHERE status = 'active'").fetchone()[0]
-        if self._vector_index.count() == active_count:
+        if index.count() == active_count:
             return
-        self._vector_index.clear()
+        index.clear()
         for row in self._conn.execute("SELECT id, embedding FROM memories WHERE status = 'active'"):
-            self._vector_index.upsert(row["id"], json.loads(row["embedding"]))
+            index.upsert(row["id"], json.loads(row["embedding"]))
         self._conn.commit()
 
     def close(self) -> None:
@@ -191,6 +192,7 @@ class MemoryStore:
             )
             self._conn.commit()
             memory_id = cur.lastrowid
+            assert memory_id is not None  # always set after a successful INSERT
             if self._vector_index is not None:
                 self._vector_index.upsert(memory_id, embedding)
                 self._conn.commit()
@@ -209,7 +211,8 @@ class MemoryStore:
         changes; other fields are updated as given, left alone otherwise.
         """
         with self._lock:
-            fields, params = [], []
+            fields: list[str] = []
+            params: list[Any] = []
             if content is not None:
                 fields.append("content = ?")
                 params.append(content)
@@ -317,7 +320,7 @@ class MemoryStore:
             return self._conn.execute("SELECT * FROM memories WHERE status != 'compacted'").fetchall()
         return self._conn.execute("SELECT * FROM memories WHERE status = 'active'").fetchall()
 
-    def _score(self, row: sqlite3.Row, sim: float, now: float, query_tokens: list[str] = ()) -> RecallResult:
+    def _score(self, row: sqlite3.Row, sim: float, now: float, query_tokens: Sequence[str] = ()) -> RecallResult:
         elapsed = now - row["last_accessed"]
         ret = retention(elapsed, row["importance"], row["access_count"], self.half_life)
         # never fully zero out a strong semantic match just because it decayed
@@ -337,7 +340,7 @@ class MemoryStore:
         return results[:k]
 
     def _recall_via_vector_index(
-        self, query_vec: list[float], k: int, now: float, query_tokens: list[str]
+        self, index: VectorIndex, query_vec: list[float], k: int, now: float, query_tokens: list[str]
     ) -> list[RecallResult]:
         """Overfetch a candidate pool by raw cosine similarity from the ANN
         index, then re-rank that (much smaller) pool by decay-weighted
@@ -349,14 +352,14 @@ class MemoryStore:
         LIMIT-bounded supplemental lookup (see below), but isn't exhaustive.
         """
         overfetch = max(k, self._vector_index_overfetch)
-        candidates = self._vector_index.search(query_vec, limit=overfetch)
+        candidates = index.search(query_vec, limit=overfetch)
         similarities = dict(candidates)
 
         if query_tokens:
             clauses = " OR ".join(["content LIKE ?"] * len(query_tokens))
-            params = [f"%{tok}%" for tok in query_tokens]
-            exclude = list(similarities) or [-1]
+            exclude: list[Any] = list(similarities) or [-1]
             placeholders = ",".join("?" * len(exclude))
+            params: list[Any] = [f"%{tok}%" for tok in query_tokens]
             for row in self._conn.execute(
                 f"SELECT id, embedding FROM memories WHERE status = 'active' "
                 f"AND id NOT IN ({placeholders}) AND ({clauses}) LIMIT {KEYWORD_SUPPLEMENT_LIMIT}",
@@ -391,8 +394,9 @@ class MemoryStore:
             query_vec = self.embedder.embed(query)
             query_tokens = _query_tokens(query)
             now = self._clock()
-            if self._vector_index is not None and not include_archived:
-                top = self._recall_via_vector_index(query_vec, k, now, query_tokens)
+            index = self._vector_index
+            if index is not None and not include_archived:
+                top = self._recall_via_vector_index(index, query_vec, k, now, query_tokens)
             else:
                 top = self._recall_brute_force(query_vec, k, now, include_archived, query_tokens)
             if touch_on_recall:
@@ -586,6 +590,7 @@ class MemoryStore:
                     ),
                 )
                 new_id = cur.lastrowid
+                assert new_id is not None  # always set after a successful INSERT
                 id_map[mem["id"]] = new_id
                 if self._vector_index is not None and mem.get("status", "active") == "active":
                     self._vector_index.upsert(new_id, embedding)

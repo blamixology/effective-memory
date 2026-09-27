@@ -18,25 +18,32 @@ Configuration (env vars, all optional):
     EFFECTIVE_MEMORY_VECTOR_INDEX          "1" to use a sqlite-vec ANN index for
                                             recall() (requires the 'vector-index' extra)
     EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH  candidate pool size before decay re-ranking
+    EFFECTIVE_MEMORY_RATE_LIMIT             requests per EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW
+                                             seconds allowed per API key (or per client
+                                             IP when auth is disabled); "0" disables it
+    EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW      window length in seconds (default 60)
 """
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
-
-MAX_CONTENT_LENGTH = 20_000
+from pydantic import BaseModel, Field, field_validator
 
 from .embeddings import get_embedder
+from .ratelimit import TokenBucketLimiter
 from .store import Memory, MemoryStore, RecallResult
+
+MAX_CONTENT_LENGTH = 20_000
+MAX_METADATA_BYTES = 10_000
 
 DB_PATH = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
 EMBEDDER_NAME = os.environ.get("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
@@ -44,6 +51,8 @@ EMBEDDING_MODEL = os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_MODEL")
 API_KEY = os.environ.get("EFFECTIVE_MEMORY_API_KEY")  # unset or "" disables auth
 VECTOR_INDEX = os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX", "") == "1"
 VECTOR_INDEX_OVERFETCH = int(os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH", "50"))
+RATE_LIMIT = int(os.environ.get("EFFECTIVE_MEMORY_RATE_LIMIT", "120"))
+RATE_LIMIT_WINDOW = float(os.environ.get("EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW", "60"))
 _STATIC_DIR = Path(__file__).parent / "web"
 
 app = FastAPI(title="effective-memory", description="A local-first memory engine.")
@@ -72,10 +81,29 @@ def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None
         raise HTTPException(status_code=401, detail="missing or invalid X-API-Key header")
 
 
-api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
+_rate_limiter = (
+    TokenBucketLimiter(rate_per_second=RATE_LIMIT / RATE_LIMIT_WINDOW, capacity=RATE_LIMIT) if RATE_LIMIT > 0 else None
+)
+
+
+def enforce_rate_limit(request: Request, provided: Optional[str] = Security(_api_key_header)) -> None:
+    if _rate_limiter is None:
+        return
+    key = provided or (request.client.host if request.client else "unknown")
+    if not _rate_limiter.allow(key):
+        raise HTTPException(status_code=429, detail="rate limit exceeded, slow down")
+
+
+api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key), Depends(enforce_rate_limit)])
 
 
 # -- schemas --------------------------------------------------------------
+
+
+def _check_metadata_size(v: Optional[dict]) -> Optional[dict]:
+    if v and len(json.dumps(v)) > MAX_METADATA_BYTES:
+        raise ValueError(f"metadata too large (max {MAX_METADATA_BYTES} bytes serialized)")
+    return v
 
 
 class AddRequest(BaseModel):
@@ -85,6 +113,8 @@ class AddRequest(BaseModel):
     importance: float = Field(1.0, ge=0.0, le=100.0)
     metadata: dict = {}
 
+    _validate_metadata = field_validator("metadata")(_check_metadata_size)
+
 
 class UpdateRequest(BaseModel):
     content: Optional[str] = Field(None, min_length=1, max_length=MAX_CONTENT_LENGTH)
@@ -92,6 +122,8 @@ class UpdateRequest(BaseModel):
     source: Optional[str] = Field(None, max_length=200)
     importance: Optional[float] = Field(None, ge=0.0, le=100.0)
     metadata: Optional[dict] = None
+
+    _validate_metadata = field_validator("metadata")(_check_metadata_size)
 
 
 class LinkRequest(BaseModel):
@@ -180,7 +212,11 @@ def update_memory(memory_id: int, req: UpdateRequest) -> dict:
         importance=req.importance,
         metadata=req.metadata,
     )
-    return _memory_out(store.get(memory_id))
+    updated = store.get(memory_id)
+    if updated is None:
+        # deleted by a concurrent request between the check above and here
+        raise HTTPException(status_code=404, detail="memory not found")
+    return _memory_out(updated)
 
 
 @api.delete("/memories/{memory_id}")
@@ -276,6 +312,7 @@ def config() -> dict:
         "vector_index": VECTOR_INDEX,
         "vector_index_overfetch": VECTOR_INDEX_OVERFETCH if VECTOR_INDEX else None,
         "auth_enabled": bool(API_KEY),
+        "rate_limit": {"requests": RATE_LIMIT, "window_seconds": RATE_LIMIT_WINDOW} if _rate_limiter else None,
     }
 
 

@@ -143,6 +143,48 @@ def test_reindex_endpoint(client):
     assert res.json() == {"reindexed": 1}
 
 
+def test_metadata_size_limit_enforced(client):
+    huge_metadata = {"blob": "x" * 20_000}
+    res = client.post("/api/memories", json={"content": "ok", "metadata": huge_metadata})
+    assert res.status_code == 422
+
+    small_metadata = {"note": "fine"}
+    res = client.post("/api/memories", json={"content": "ok", "metadata": small_metadata})
+    assert res.status_code == 200
+
+
+def test_rate_limit_returns_429_once_exhausted(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "ratelimit_test.db"))
+    monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT", "3")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW", "60")
+    import effective_memory.api as api
+
+    importlib.reload(api)
+    try:
+        with TestClient(api.app) as c:
+            statuses = [c.get("/api/stats").status_code for _ in range(5)]
+            assert statuses[:3] == [200, 200, 200]
+            assert 429 in statuses
+    finally:
+        api.store.close()
+
+
+def test_rate_limit_disabled_when_zero(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "ratelimit_off.db"))
+    monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT", "0")
+    import effective_memory.api as api
+
+    importlib.reload(api)
+    try:
+        with TestClient(api.app) as c:
+            statuses = [c.get("/api/stats").status_code for _ in range(20)]
+            assert all(s == 200 for s in statuses)
+    finally:
+        api.store.close()
+
+
 def test_healthz_is_unauthenticated(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "healthz_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "topsecret")

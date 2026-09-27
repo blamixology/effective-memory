@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
-from typing import Iterable, Optional, Protocol
+from typing import Callable, Iterable, Optional, Protocol
 
 
 class Embedder(Protocol):
@@ -130,7 +130,7 @@ class SentenceTransformerEmbedder:
         return self._model.encode(text, convert_to_numpy=True).tolist()
 
 
-_EMBEDDER_FACTORIES = {
+_EMBEDDER_FACTORIES: dict[str, Callable[[Optional[str], Optional[str]], Embedder]] = {
     "hashing": lambda model, api_key: HashingEmbedder(),
     "voyage": lambda model, api_key: VoyageEmbedder(model=model or "voyage-3.5", api_key=api_key),
     "openai": lambda model, api_key: OpenAIEmbedder(model=model or "text-embedding-3-small", api_key=api_key),

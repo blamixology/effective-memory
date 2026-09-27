@@ -123,6 +123,12 @@ def test_serve_generates_key_only_when_unset(monkeypatch, db_path):
     cli.main(["--db", db_path, "serve"])
     assert os.environ["EFFECTIVE_MEMORY_API_KEY"] == ""  # explicit empty must stay disabled
 
+    assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] == "120"
+    assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW"] == "60.0"
+
+    cli.main(["--db", db_path, "serve", "--rate-limit", "0"])
+    assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] == "0"
+
     monkeypatch.delenv("EFFECTIVE_MEMORY_API_KEY", raising=False)
     cli.main(["--db", db_path, "serve", "--api-key", "mykey"])
     assert os.environ["EFFECTIVE_MEMORY_API_KEY"] == "mykey"

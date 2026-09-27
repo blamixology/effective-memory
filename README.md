@@ -27,6 +27,8 @@ SQLite file. Both the embedder and the summarizer used during compaction
 are pluggable, so you can swap in a real embedding model or an LLM-backed
 summarizer.
 
+See [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
+
 ## Install
 
 ```bash
@@ -161,11 +163,27 @@ without a key; everything under `/api/*` is protected.
 
 `/api/*` bounds the obvious abuse/mistake vectors on a service that's now
 network-reachable rather than always local-only: memory `content` is capped
-at 20,000 characters, `k`/`limit`/`offset`/`budget` have sane min/max
-ranges, and `compact()`'s thresholds are clamped to their valid `[0, 1]`
-(or `[-1, 1]` for cosine similarity) ranges. Out-of-range values return
-`422` rather than being silently clamped or allowed to run unbounded
-queries.
+at 20,000 characters, serialized `metadata` at 10,000 bytes,
+`k`/`limit`/`offset`/`budget` have sane min/max ranges, and `compact()`'s
+thresholds are clamped to their valid `[0, 1]` (or `[-1, 1]` for cosine
+similarity) ranges. Out-of-range values return `422` rather than being
+silently clamped or allowed to run unbounded queries.
+
+### Rate limiting
+
+`/api/*` also enforces a per-API-key (or per-client-IP when auth is
+disabled) token-bucket rate limit -- this now fronts paid embedding and
+summarization providers, so an over-trusted or leaked key shouldn't be able
+to run up an unbounded bill or hammer the process:
+
+```bash
+emem serve --db mem.db --rate-limit 120 --rate-limit-window 60  # the defaults
+emem serve --db mem.db --rate-limit 0                            # disabled
+```
+
+Exceeding the limit returns `429`. It's in-process only (not distributed or
+persisted across restarts), which matches the single-process `emem serve`
+deployment model this project supports.
 
 ## Real embedding-model backends
 
@@ -289,7 +307,9 @@ Dockerfile's `HEALTHCHECK` and the compose file's `healthcheck:` block.
 Actually build-and-run verified (not just reviewed): `docker build`,
 `docker run`, `docker inspect --format '{{json .State.Health}}'` reporting
 `"healthy"`, and a full add/recall/stats/healthz smoke test against the
-running container, all passing.
+running container, all passing. CI now runs this same build-run-smoke-test
+sequence on every push and PR (see Tests below), so this doesn't stay true
+only as of when it was last checked by hand.
 
 ## Design
 
@@ -308,10 +328,12 @@ running container, all passing.
   `delete`), linking, `recall`, `build_context`, `review_due`, `compact`,
   `list_memories`/`count_memories`, `tags`, `export_data`/`import_data`,
   `reindex`, `stats`.
+- `ratelimit.py` — `TokenBucketLimiter`, the in-process rate limiter behind
+  `/api/*`.
 - `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
-- `api.py` / `web/index.html` — FastAPI REST API (API-key auth on `/api/*`)
-  and a dependency-free vanilla-JS single-page UI on top of it (optional
-  `web` extra).
+- `api.py` / `web/index.html` — FastAPI REST API (API-key auth + rate
+  limiting + input limits on `/api/*`) and a dependency-free vanilla-JS
+  single-page UI on top of it (optional `web` extra).
 - `Dockerfile` / `docker-compose.yml` — containerized `emem serve` with a
   persistent volume for the SQLite store.
 
@@ -320,13 +342,21 @@ running container, all passing.
 ```bash
 pip install -e ".[dev,web]"   # httpx2 + fastapi needed for the API integration tests
 pytest -q
+ruff check src tests
+mypy src/effective_memory
 ```
 
 Coverage includes the store (`test_store.py`), the CLI end-to-end via
-`cli.main([...])` (`test_cli.py`), and the REST API end-to-end via FastAPI's
-`TestClient` (`test_api.py`) -- not just manual curl/CLI smoke tests.
+`cli.main([...])` (`test_cli.py`), the REST API end-to-end via FastAPI's
+`TestClient` (`test_api.py`), and the rate limiter in isolation
+(`test_ratelimit.py`) -- not just manual curl/CLI smoke tests.
 
-CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10-3.12 on every
-push and PR. Tests for optional extras (voyage/openai/sentence-transformers/
-llm/vector-index) skip themselves gracefully when that extra isn't
-installed.
+CI (`.github/workflows/ci.yml`) has three jobs on every push and PR:
+- **test** — the suite on Python 3.10-3.12. Tests for optional extras
+  (voyage/openai/sentence-transformers/llm/vector-index) skip themselves
+  gracefully when that extra isn't installed.
+- **lint** — `ruff check` and `mypy`.
+- **docker** — builds the real `Dockerfile`, runs the container, polls
+  `docker inspect` for a `healthy` `HEALTHCHECK`, then smoke-tests
+  `/healthz`, an authenticated add + stats round trip, and that an
+  unauthenticated request is rejected.

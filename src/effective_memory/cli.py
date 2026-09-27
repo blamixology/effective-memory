@@ -14,6 +14,7 @@
     emem reindex
     emem stats
     emem serve [--host 127.0.0.1] [--port 8000] [--api-key KEY | --no-auth]
+               [--rate-limit 120] [--rate-limit-window 60]
 
 Add --embedder {hashing,voyage,openai,sentence-transformers} (default:
 hashing) and --embedding-model NAME before the subcommand to use a real
@@ -185,6 +186,8 @@ def _serve(args: argparse.Namespace) -> None:
     if args.vector_index:
         os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX"] = "1"
         os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH"] = str(args.vector_index_overfetch)
+    os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] = str(args.rate_limit)
+    os.environ["EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW"] = str(args.rate_limit_window)
 
     if args.no_auth:
         os.environ["EFFECTIVE_MEMORY_API_KEY"] = ""
@@ -306,6 +309,13 @@ def main(argv: list[str] | None = None) -> int:
     p_serve.add_argument("--port", type=int, default=8000)
     p_serve.add_argument("--api-key", default=None, help="require this key on the 'X-API-Key' header")
     p_serve.add_argument("--no-auth", action="store_true", help="disable API key auth (local/dev use only)")
+    p_serve.add_argument(
+        "--rate-limit",
+        type=int,
+        default=120,
+        help="max requests per --rate-limit-window per API key/IP on /api/*; 0 disables it",
+    )
+    p_serve.add_argument("--rate-limit-window", type=float, default=60.0, help="rate limit window, in seconds")
     p_serve.set_defaults(func=_serve)
 
     args = parser.parse_args(argv)
