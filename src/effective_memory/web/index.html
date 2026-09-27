@@ -79,8 +79,13 @@
     padding: 12px 14px;
     margin-bottom: 10px;
   }
-  .card .content { font-size: 14px; margin-bottom: 6px; }
-  .card .meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+  .card .content { font-size: 14px; margin-bottom: 6px; display: flex; justify-content: space-between; gap: 10px; }
+  .card .meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .icon-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 12px; padding: 0 2px; flex-shrink: 0;
+  }
+  .icon-btn:hover { color: #e05c5c; }
   .tag {
     background: rgba(110, 168, 254, 0.15);
     color: var(--accent);
@@ -117,6 +122,7 @@
   <button data-panel="recall">Recall</button>
   <button data-panel="context">Context</button>
   <button data-panel="review">Review</button>
+  <button data-panel="manage">Manage</button>
   <button data-panel="compact">Compact</button>
   <button data-panel="stats">Stats</button>
 </nav>
@@ -160,12 +166,39 @@
     <div id="review-results"></div>
   </section>
 
+  <section class="panel" id="panel-manage">
+    <div class="row">
+      <input type="number" id="manage-id" placeholder="memory ID" style="width:120px" />
+      <button class="action" onclick="loadMemory()">Load</button>
+    </div>
+    <div id="manage-form" style="display:none">
+      <textarea id="manage-content"></textarea>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="manage-tags" placeholder="tags (comma separated)" />
+        <input type="text" id="manage-source" placeholder="source" />
+        <input type="number" id="manage-importance" step="0.1" style="width:110px" />
+      </div>
+      <div class="row">
+        <button class="action" onclick="saveMemory()">Save changes</button>
+        <button class="action" style="background:#e05c5c" onclick="deleteMemoryById()">Delete</button>
+      </div>
+    </div>
+    <div id="manage-result" class="empty"></div>
+  </section>
+
   <section class="panel" id="panel-compact">
     <div class="row">
       <label style="align-self:center;color:var(--muted);font-size:13px">retention threshold</label>
       <input type="number" id="compact-threshold" value="0.15" step="0.05" style="width:90px" />
       <label style="align-self:center;color:var(--muted);font-size:13px">cluster similarity</label>
       <input type="number" id="compact-similarity" value="0.75" step="0.05" style="width:90px" />
+    </div>
+    <div class="row">
+      <label style="align-self:center;color:var(--muted);font-size:13px">summarizer</label>
+      <select id="compact-summarizer" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+        <option value="none">none (extractive join)</option>
+        <option value="claude">claude (real summary, needs the 'llm' extra + API key)</option>
+      </select>
       <button class="action" onclick="doCompact()">Compact now</button>
     </div>
     <div id="compact-result" class="empty"></div>
@@ -215,10 +248,18 @@ async function apiFetch(url, opts = {}) {
 
 function memCard(mem, extra) {
   const tags = (mem.tags || []).map(t => `<span class="tag">${t}</span>`).join(' ');
-  return `<div class="card">
-    <div class="content">#${mem.id} ${mem.content}</div>
+  return `<div class="card" data-id="${mem.id}">
+    <div class="content"><span>#${mem.id} ${mem.content}</span>
+      <button class="icon-btn" title="delete" onclick="deleteCard(${mem.id}, this)">&#10005;</button>
+    </div>
     <div class="meta">${tags} ${extra || ''}</div>
   </div>`;
+}
+
+async function deleteCard(id, btn) {
+  if (!window.confirm(`Delete memory #${id}?`)) return;
+  const res = await apiFetch(`/api/memories/${id}`, {method: 'DELETE'});
+  if (res.ok) btn.closest('.card').remove();
 }
 
 async function addMemory() {
@@ -272,14 +313,59 @@ async function doReview() {
 async function doCompact() {
   const retention_threshold = parseFloat($('compact-threshold').value) || 0.15;
   const cluster_similarity = parseFloat($('compact-similarity').value) || 0.75;
+  const summarizer = $('compact-summarizer').value;
   const res = await apiFetch('/api/compact', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({retention_threshold, cluster_similarity})
+    body: JSON.stringify({retention_threshold, cluster_similarity, summarizer})
   });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    $('compact-result').textContent = `error: ${err.detail || res.statusText}`;
+    return;
+  }
   const data = await res.json();
   $('compact-result').textContent = data.new_ids.length
     ? `compacted into ${data.new_ids.length} summary memories: ${data.new_ids.join(', ')}`
     : 'nothing to compact';
+}
+
+async function loadMemory() {
+  const id = $('manage-id').value;
+  if (!id) return;
+  const res = await apiFetch(`/api/memories/${id}`);
+  if (!res.ok) {
+    $('manage-form').style.display = 'none';
+    $('manage-result').textContent = res.status === 404 ? 'no memory with that ID' : `error: ${res.statusText}`;
+    return;
+  }
+  const mem = await res.json();
+  $('manage-content').value = mem.content;
+  $('manage-tags').value = (mem.tags || []).join(', ');
+  $('manage-source').value = mem.source || '';
+  $('manage-importance').value = mem.importance;
+  $('manage-form').style.display = 'block';
+  $('manage-result').textContent = '';
+}
+
+async function saveMemory() {
+  const id = $('manage-id').value;
+  const content = $('manage-content').value.trim();
+  const tags = $('manage-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+  const source = $('manage-source').value.trim() || null;
+  const importance = parseFloat($('manage-importance').value);
+  const res = await apiFetch(`/api/memories/${id}`, {
+    method: 'PATCH', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content, tags, source, importance})
+  });
+  $('manage-result').textContent = res.ok ? 'saved' : `error: ${res.statusText}`;
+}
+
+async function deleteMemoryById() {
+  const id = $('manage-id').value;
+  if (!id || !window.confirm(`Delete memory #${id}?`)) return;
+  const res = await apiFetch(`/api/memories/${id}`, {method: 'DELETE'});
+  $('manage-result').textContent = res.ok ? 'deleted' : `error: ${res.statusText}`;
+  if (res.ok) $('manage-form').style.display = 'none';
 }
 
 async function loadStats() {

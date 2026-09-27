@@ -57,12 +57,18 @@ with MemoryStore("mem.db") as mem:
 
     # efficient memory management: merge decayed, similar memories
     mem.compact(retention_threshold=0.15)
+
+    # edit or remove a memory
+    mem.update(a, content="Alice works at Acme as a backend engineer")
+    mem.delete(b)
 ```
 
 ## CLI
 
 ```bash
 emem add "The user prefers dark mode" --tags preference
+emem update 1 --content "The user prefers dark mode everywhere" --importance 1.5
+emem delete 1
 emem recall "what theme does the user like"
 emem context "summarize what I know about the user" --budget 300
 emem review --threshold 0.3
@@ -87,13 +93,18 @@ by a JSON API under `/api/*`:
 |--------|-------------------------|---------------------------------------|
 | POST   | `/api/memories`         | add a memory                          |
 | GET    | `/api/memories/{id}`    | fetch one memory                      |
+| PATCH  | `/api/memories/{id}`    | edit a memory (re-embeds if `content` changes) |
+| DELETE | `/api/memories/{id}`    | delete a memory                       |
 | GET    | `/api/memories/{id}/links` | list its links                     |
 | POST   | `/api/links`            | link two memories                     |
 | GET    | `/api/recall?q=...&k=5` | semantic recall                       |
 | GET    | `/api/context?q=...&budget=500` | build an LLM-ready context block |
 | GET    | `/api/review?threshold=0.3` | spaced-repetition review queue    |
-| POST   | `/api/compact`          | cluster + summarize decayed memories  |
+| POST   | `/api/compact`          | cluster + summarize decayed memories (`summarizer: "none"\|"claude"`) |
 | GET    | `/api/stats`            | store statistics                      |
+
+The web UI's **Manage** tab covers editing/deleting a memory by ID, and
+every recall/review card has a delete (✕) button.
 
 The API can also be run directly with `uvicorn effective_memory.api:app`,
 configured entirely via env vars (`EFFECTIVE_MEMORY_DB`,
@@ -145,6 +156,47 @@ breaks recall for anything added under the old one.
 For `emem serve`, set `EFFECTIVE_MEMORY_EMBEDDER` and
 `EFFECTIVE_MEMORY_EMBEDDING_MODEL` instead of the CLI flags.
 
+## Real LLM summarization for compaction
+
+By default `compact()` just concatenates a cluster's memories with `" | "`
+— it doesn't actually compress anything. Pass `--summarizer claude` (CLI) or
+`"summarizer": "claude"` (API) to have Claude merge each cluster into one
+shorter memory that keeps every distinct fact:
+
+```bash
+pip install -e ".[dev,llm]"                     # needs ANTHROPIC_API_KEY
+emem compact --summarizer claude
+emem compact --summarizer claude --summarizer-model claude-opus-5
+```
+
+From Python, pass any `list[str] -> str` callable:
+
+```python
+from effective_memory.summarizer import claude_summarizer
+mem.compact(summarizer=claude_summarizer())
+```
+
+## Scaling recall with a vector index
+
+`recall()` normally scores every active memory in Python — fine for small
+stores, but it becomes the bottleneck past a few thousand memories. Pass
+`--vector-index` (CLI) or `EFFECTIVE_MEMORY_VECTOR_INDEX=1` (API) to back it
+with a [sqlite-vec](https://github.com/asg017/sqlite-vec) ANN table instead:
+
+```bash
+pip install -e ".[dev,vector-index]"
+emem --vector-index recall "..."
+```
+
+`recall()` then fetches a candidate pool (`--vector-index-overfetch`,
+default 50) by raw cosine similarity from the index, and only re-ranks that
+pool by the decay-weighted score in Python — so it stays fast without
+rescanning the whole store, at the cost of only ever considering the top
+`overfetch` candidates by similarity. Enabling it against a store that
+already has data triggers a one-time backfill on open. The embedding
+dimension is fixed at index-creation time, so this inherits the existing
+"pick one embedder per `--db`" rule.
+
 ## Docker
 
 ```bash
@@ -169,8 +221,13 @@ in the container.
   `embed(text) -> list[float]`.
 - `decay.py` — the forgetting-curve math: `retention(elapsed, importance,
   access_count)`.
-- `store.py` — SQLite-backed `MemoryStore`: CRUD, linking, `recall`,
-  `build_context`, `review_due`, `compact`, `stats`.
+- `summarizer.py` — `claude_summarizer()`, an LLM-backed summarizer for
+  `compact()` (optional `llm` extra).
+- `vector_index.py` — `VectorIndex`, a sqlite-vec ANN wrapper `recall()` uses
+  at scale (optional `vector-index` extra).
+- `store.py` — SQLite-backed `MemoryStore`: CRUD (`add`/`get`/`update`/
+  `delete`), linking, `recall`, `build_context`, `review_due`, `compact`,
+  `stats`.
 - `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
 - `api.py` / `web/index.html` — FastAPI REST API (API-key auth on `/api/*`)
   and a dependency-free vanilla-JS single-page UI on top of it (optional

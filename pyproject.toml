@@ -17,6 +17,8 @@ web = ["fastapi>=0.100", "uvicorn[standard]>=0.23"]
 voyage = ["voyageai>=0.2"]
 openai = ["openai>=1.0"]
 sentence-transformers = ["sentence-transformers>=2.2"]
+llm = ["anthropic>=0.40"]
+vector-index = ["sqlite-vec>=0.1"]
 
 [project.scripts]
 emem = "effective_memory.cli:main"

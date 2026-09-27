@@ -3,8 +3,10 @@
     emem add "text" [--tags a,b] [--source name] [--importance 1.0]
     emem recall "query" [--k 5]
     emem context "query" [--budget 500]
+    emem update ID [--content ...] [--tags a,b] [--source name] [--importance 1.0]
+    emem delete ID
     emem review [--threshold 0.3] [--limit 10]
-    emem compact [--threshold 0.15]
+    emem compact [--threshold 0.15] [--summarizer none|claude] [--summarizer-model NAME]
     emem stats
     emem serve [--host 127.0.0.1] [--port 8000] [--api-key KEY | --no-auth]
 
@@ -13,6 +15,10 @@ hashing) and --embedding-model NAME before the subcommand to use a real
 embedding model instead of the dependency-free default. The same choice
 must be used consistently for a given --db, since vectors from different
 embedders aren't comparable.
+
+Add --vector-index before the subcommand to use a sqlite-vec ANN index for
+recall() instead of scanning every row -- worthwhile once a store holds
+more than a few thousand memories (requires the 'vector-index' extra).
 """
 
 from __future__ import annotations
@@ -29,7 +35,12 @@ DEFAULT_DB = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
 
 def _open_store(args: argparse.Namespace) -> MemoryStore:
     embedder = get_embedder(args.embedder, model=args.embedding_model)
-    return MemoryStore(args.db, embedder=embedder)
+    return MemoryStore(
+        args.db,
+        embedder=embedder,
+        vector_index=args.vector_index,
+        vector_index_overfetch=args.vector_index_overfetch,
+    )
 
 
 def _add(args: argparse.Namespace) -> None:
@@ -37,6 +48,25 @@ def _add(args: argparse.Namespace) -> None:
         tags = args.tags.split(",") if args.tags else []
         memory_id = store.add(args.text, tags=tags, source=args.source, importance=args.importance)
         print(f"added memory #{memory_id}")
+
+
+def _update(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        tags = args.tags.split(",") if args.tags is not None else None
+        store.update(
+            args.id,
+            content=args.content,
+            tags=tags,
+            source=args.source,
+            importance=args.importance,
+        )
+        print(f"updated memory #{args.id}")
+
+
+def _delete(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        store.delete(args.id)
+        print(f"deleted memory #{args.id}")
 
 
 def _recall(args: argparse.Namespace) -> None:
@@ -65,8 +95,14 @@ def _review(args: argparse.Namespace) -> None:
 
 
 def _compact(args: argparse.Namespace) -> None:
+    summarizer = None
+    if args.summarizer == "claude":
+        from .summarizer import claude_summarizer
+
+        summarizer = claude_summarizer(model=args.summarizer_model or "claude-opus-5")
+
     with _open_store(args) as store:
-        new_ids = store.compact(retention_threshold=args.threshold)
+        new_ids = store.compact(retention_threshold=args.threshold, summarizer=summarizer)
         if not new_ids:
             print("nothing to compact")
         else:
@@ -92,6 +128,9 @@ def _serve(args: argparse.Namespace) -> None:
     os.environ["EFFECTIVE_MEMORY_EMBEDDER"] = args.embedder
     if args.embedding_model:
         os.environ["EFFECTIVE_MEMORY_EMBEDDING_MODEL"] = args.embedding_model
+    if args.vector_index:
+        os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX"] = "1"
+        os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH"] = str(args.vector_index_overfetch)
 
     if args.no_auth:
         os.environ["EFFECTIVE_MEMORY_API_KEY"] = ""
@@ -116,6 +155,17 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="embedding backend (default: hashing, dependency-free)",
     )
     parser.add_argument("--embedding-model", default=None, help="model name for the chosen embedder")
+    parser.add_argument(
+        "--vector-index",
+        action="store_true",
+        help="use a sqlite-vec ANN index for recall() (requires the 'vector-index' extra)",
+    )
+    parser.add_argument(
+        "--vector-index-overfetch",
+        type=int,
+        default=50,
+        help="candidate pool size fetched from the index before decay re-ranking",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -129,6 +179,18 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--source", default=None)
     p_add.add_argument("--importance", type=float, default=1.0)
     p_add.set_defaults(func=_add)
+
+    p_update = sub.add_parser("update", help="edit an existing memory")
+    p_update.add_argument("id", type=int)
+    p_update.add_argument("--content", default=None)
+    p_update.add_argument("--tags", default=None, help="replaces all tags")
+    p_update.add_argument("--source", default=None)
+    p_update.add_argument("--importance", type=float, default=None)
+    p_update.set_defaults(func=_update)
+
+    p_delete = sub.add_parser("delete", help="delete a memory")
+    p_delete.add_argument("id", type=int)
+    p_delete.set_defaults(func=_delete)
 
     p_recall = sub.add_parser("recall", help="semantically search memories")
     p_recall.add_argument("query")
@@ -147,6 +209,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p_compact = sub.add_parser("compact", help="cluster and summarize decayed memories")
     p_compact.add_argument("--threshold", type=float, default=0.15)
+    p_compact.add_argument(
+        "--summarizer",
+        default="none",
+        choices=["none", "claude"],
+        help="'claude' asks Claude to merge each cluster into a real summary (requires the 'llm' extra); "
+        "'none' (default) just concatenates the cluster's contents",
+    )
+    p_compact.add_argument("--summarizer-model", default=None, help="model name when --summarizer=claude")
     p_compact.set_defaults(func=_compact)
 
     p_stats = sub.add_parser("stats", help="show store statistics")

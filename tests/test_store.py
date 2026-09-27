@@ -117,3 +117,45 @@ def test_stats_counts(store):
     assert stats["total"] == 2
     assert stats["by_status"]["active"] == 2
     assert stats["links"] == 0
+
+
+def test_update_content_reembeds(store):
+    mid = store.add("the sky is blue", tags=["fact"])
+    store.update(mid, content="the ocean is deep")
+    mem = store.get(mid)
+    assert mem.content == "the ocean is deep"
+    assert mem.tags == ["fact"]  # untouched fields stay as-is
+
+    results = store.recall("how deep is the ocean", k=1, touch_on_recall=False)
+    assert results[0].memory.id == mid
+
+
+def test_update_partial_fields(store):
+    mid = store.add("original", tags=["a"], importance=1.0)
+    store.update(mid, tags=["b", "c"], importance=2.0)
+    mem = store.get(mid)
+    assert mem.content == "original"
+    assert mem.tags == ["b", "c"]
+    assert mem.importance == 2.0
+
+
+def test_update_noop_without_fields(store):
+    mid = store.add("unchanged")
+    store.update(mid)
+    mem = store.get(mid)
+    assert mem.content == "unchanged"
+
+
+def test_delete_removes_memory(store):
+    mid = store.add("to be deleted")
+    store.delete(mid)
+    assert store.get(mid) is None
+    assert store.stats()["total"] == 0
+
+
+def test_delete_cascades_links(store):
+    a = store.add("Alice")
+    b = store.add("Bob")
+    store.link(a, b, relation="knows")
+    store.delete(a)
+    assert store.stats()["links"] == 0

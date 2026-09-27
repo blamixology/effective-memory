@@ -9,12 +9,15 @@ or directly:
     uvicorn effective_memory.api:app
 
 Configuration (env vars, all optional):
-    EFFECTIVE_MEMORY_DB               path to the SQLite store
-    EFFECTIVE_MEMORY_EMBEDDER         hashing | voyage | openai | sentence-transformers
-    EFFECTIVE_MEMORY_EMBEDDING_MODEL  model name for the chosen embedder
-    EFFECTIVE_MEMORY_API_KEY          required on the "X-API-Key" header for
-                                       every /api/* request; set to "" to
-                                       disable auth (local/dev use only)
+    EFFECTIVE_MEMORY_DB                    path to the SQLite store
+    EFFECTIVE_MEMORY_EMBEDDER              hashing | voyage | openai | sentence-transformers
+    EFFECTIVE_MEMORY_EMBEDDING_MODEL       model name for the chosen embedder
+    EFFECTIVE_MEMORY_API_KEY               required on the "X-API-Key" header for
+                                            every /api/* request; set to "" to
+                                            disable auth (local/dev use only)
+    EFFECTIVE_MEMORY_VECTOR_INDEX          "1" to use a sqlite-vec ANN index for
+                                            recall() (requires the 'vector-index' extra)
+    EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH  candidate pool size before decay re-ranking
 """
 
 from __future__ import annotations
@@ -37,10 +40,17 @@ DB_PATH = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
 EMBEDDER_NAME = os.environ.get("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
 EMBEDDING_MODEL = os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_MODEL")
 API_KEY = os.environ.get("EFFECTIVE_MEMORY_API_KEY")  # unset or "" disables auth
+VECTOR_INDEX = os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX", "") == "1"
+VECTOR_INDEX_OVERFETCH = int(os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH", "50"))
 _STATIC_DIR = Path(__file__).parent / "web"
 
 app = FastAPI(title="effective-memory", description="A local-first memory engine.")
-store = MemoryStore(DB_PATH, embedder=get_embedder(EMBEDDER_NAME, model=EMBEDDING_MODEL))
+store = MemoryStore(
+    DB_PATH,
+    embedder=get_embedder(EMBEDDER_NAME, model=EMBEDDING_MODEL),
+    vector_index=VECTOR_INDEX,
+    vector_index_overfetch=VECTOR_INDEX_OVERFETCH,
+)
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -66,6 +76,14 @@ class AddRequest(BaseModel):
     metadata: dict = {}
 
 
+class UpdateRequest(BaseModel):
+    content: Optional[str] = None
+    tags: Optional[list[str]] = None
+    source: Optional[str] = None
+    importance: Optional[float] = None
+    metadata: Optional[dict] = None
+
+
 class LinkRequest(BaseModel):
     src_id: int
     dst_id: int
@@ -75,6 +93,8 @@ class LinkRequest(BaseModel):
 class CompactRequest(BaseModel):
     retention_threshold: float = 0.15
     cluster_similarity: float = 0.75
+    summarizer: str = "none"  # "none" or "claude"
+    summarizer_model: Optional[str] = None
 
 
 def _memory_out(m: Memory) -> dict:
@@ -120,6 +140,29 @@ def get_memory(memory_id: int) -> dict:
     return _memory_out(memory)
 
 
+@api.patch("/memories/{memory_id}")
+def update_memory(memory_id: int, req: UpdateRequest) -> dict:
+    if store.get(memory_id) is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    store.update(
+        memory_id,
+        content=req.content,
+        tags=req.tags,
+        source=req.source,
+        importance=req.importance,
+        metadata=req.metadata,
+    )
+    return _memory_out(store.get(memory_id))
+
+
+@api.delete("/memories/{memory_id}")
+def delete_memory(memory_id: int) -> dict:
+    if store.get(memory_id) is None:
+        raise HTTPException(status_code=404, detail="memory not found")
+    store.delete(memory_id)
+    return {"ok": True}
+
+
 @api.get("/memories/{memory_id}/links")
 def get_links(memory_id: int) -> list[dict]:
     return [{"relation": rel, "memory": _memory_out(m)} for rel, m in store.links_for(memory_id)]
@@ -148,7 +191,22 @@ def review(threshold: float = 0.3, limit: int = 10) -> list[dict]:
 
 @api.post("/compact")
 def compact(req: CompactRequest) -> dict:
-    new_ids = store.compact(retention_threshold=req.retention_threshold, cluster_similarity=req.cluster_similarity)
+    summarizer = None
+    if req.summarizer == "claude":
+        from .summarizer import claude_summarizer
+
+        try:
+            summarizer = claude_summarizer(model=req.summarizer_model or "claude-opus-5")
+        except ImportError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+    elif req.summarizer != "none":
+        raise HTTPException(status_code=400, detail="summarizer must be 'none' or 'claude'")
+
+    new_ids = store.compact(
+        retention_threshold=req.retention_threshold,
+        cluster_similarity=req.cluster_similarity,
+        summarizer=summarizer,
+    )
     return {"new_ids": new_ids}
 
 

@@ -22,6 +22,7 @@ from typing import Callable, Optional
 
 from .decay import DEFAULT_HALF_LIFE_SECONDS, retention
 from .embeddings import Embedder, HashingEmbedder, cosine_similarity
+from .vector_index import VectorIndex
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS memories (
@@ -95,6 +96,8 @@ class MemoryStore:
         embedder: Optional[Embedder] = None,
         half_life: float = DEFAULT_HALF_LIFE_SECONDS,
         clock: Callable[[], float] = time.time,
+        vector_index: bool = False,
+        vector_index_overfetch: int = 50,
     ):
         self.embedder = embedder or HashingEmbedder()
         self.half_life = half_life
@@ -104,6 +107,24 @@ class MemoryStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.executescript(_SCHEMA)
+        self._conn.commit()
+
+        self._vector_index_overfetch = vector_index_overfetch
+        self._vector_index: Optional[VectorIndex] = None
+        if vector_index:
+            self._vector_index = VectorIndex(self._conn, dims=self.embedder.dims)
+            self._sync_vector_index()
+
+    def _sync_vector_index(self) -> None:
+        """Rebuild the vector index from `memories` if it's out of sync --
+        e.g. it was just enabled against a store that already has data.
+        """
+        active_count = self._conn.execute("SELECT COUNT(*) FROM memories WHERE status = 'active'").fetchone()[0]
+        if self._vector_index.count() == active_count:
+            return
+        self._vector_index.clear()
+        for row in self._conn.execute("SELECT id, embedding FROM memories WHERE status = 'active'"):
+            self._vector_index.upsert(row["id"], json.loads(row["embedding"]))
         self._conn.commit()
 
     def close(self) -> None:
@@ -144,7 +165,60 @@ class MemoryStore:
                 ),
             )
             self._conn.commit()
-            return cur.lastrowid
+            memory_id = cur.lastrowid
+            if self._vector_index is not None:
+                self._vector_index.upsert(memory_id, embedding)
+                self._conn.commit()
+            return memory_id
+
+    def update(
+        self,
+        memory_id: int,
+        content: Optional[str] = None,
+        tags: Optional[list[str]] = None,
+        source: Optional[str] = None,
+        importance: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> None:
+        """Edit a memory in place. Re-embeds and re-indexes when `content`
+        changes; other fields are updated as given, left alone otherwise.
+        """
+        with self._lock:
+            fields, params = [], []
+            if content is not None:
+                fields.append("content = ?")
+                params.append(content)
+                embedding = self.embedder.embed(content)
+                fields.append("embedding = ?")
+                params.append(json.dumps(embedding))
+            if tags is not None:
+                fields.append("tags = ?")
+                params.append(json.dumps(tags))
+            if source is not None:
+                fields.append("source = ?")
+                params.append(source)
+            if importance is not None:
+                fields.append("importance = ?")
+                params.append(importance)
+            if metadata is not None:
+                fields.append("metadata = ?")
+                params.append(json.dumps(metadata))
+            if not fields:
+                return
+            params.append(memory_id)
+            self._conn.execute(f"UPDATE memories SET {', '.join(fields)} WHERE id = ?", params)
+            self._conn.commit()
+            if content is not None and self._vector_index is not None:
+                self._vector_index.upsert(memory_id, embedding)
+                self._conn.commit()
+
+    def delete(self, memory_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM memories WHERE id = ?", (memory_id,))
+            self._conn.commit()
+            if self._vector_index is not None:
+                self._vector_index.delete(memory_id)
+                self._conn.commit()
 
     def link(self, src_id: int, dst_id: int, relation: str = "related") -> None:
         with self._lock:
@@ -184,6 +258,42 @@ class MemoryStore:
             return self._conn.execute("SELECT * FROM memories WHERE status != 'compacted'").fetchall()
         return self._conn.execute("SELECT * FROM memories WHERE status = 'active'").fetchall()
 
+    def _score(self, row: sqlite3.Row, sim: float, now: float) -> RecallResult:
+        elapsed = now - row["last_accessed"]
+        ret = retention(elapsed, row["importance"], row["access_count"], self.half_life)
+        # never fully zero out a strong semantic match just because it decayed
+        score = sim * (0.3 + 0.7 * ret)
+        return RecallResult(memory=_row_to_memory(row), similarity=sim, retention=ret, score=score)
+
+    def _recall_brute_force(self, query_vec: list[float], k: int, now: float, include_archived: bool) -> list[RecallResult]:
+        results = []
+        for row in self._active_rows(include_archived):
+            sim = cosine_similarity(query_vec, json.loads(row["embedding"]))
+            results.append(self._score(row, sim, now))
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:k]
+
+    def _recall_via_vector_index(self, query_vec: list[float], k: int, now: float) -> list[RecallResult]:
+        """Overfetch a candidate pool by raw cosine similarity from the ANN
+        index, then re-rank that (much smaller) pool by decay-weighted
+        score in Python. This avoids scanning every row for large stores,
+        at the cost of only ever re-ranking within the top `overfetch`
+        candidates by pure similarity.
+        """
+        overfetch = max(k, self._vector_index_overfetch)
+        candidates = self._vector_index.search(query_vec, limit=overfetch)
+        if not candidates:
+            return []
+        similarities = dict(candidates)
+        placeholders = ",".join("?" * len(similarities))
+        rows = self._conn.execute(
+            f"SELECT * FROM memories WHERE id IN ({placeholders}) AND status = 'active'",
+            list(similarities),
+        ).fetchall()
+        results = [self._score(row, similarities[row["id"]], now) for row in rows]
+        results.sort(key=lambda r: r.score, reverse=True)
+        return results[:k]
+
     def recall(
         self,
         query: str,
@@ -197,18 +307,10 @@ class MemoryStore:
         with self._lock:
             query_vec = self.embedder.embed(query)
             now = self._clock()
-            results: list[RecallResult] = []
-            for row in self._active_rows(include_archived):
-                embedding = json.loads(row["embedding"])
-                sim = cosine_similarity(query_vec, embedding)
-                elapsed = now - row["last_accessed"]
-                ret = retention(elapsed, row["importance"], row["access_count"], self.half_life)
-                # never fully zero out a strong semantic match just because it decayed
-                score = sim * (0.3 + 0.7 * ret)
-                results.append(RecallResult(memory=_row_to_memory(row), similarity=sim, retention=ret, score=score))
-
-            results.sort(key=lambda r: r.score, reverse=True)
-            top = results[:k]
+            if self._vector_index is not None and not include_archived:
+                top = self._recall_via_vector_index(query_vec, k, now)
+            else:
+                top = self._recall_brute_force(query_vec, k, now, include_archived)
             if touch_on_recall:
                 for r in top:
                     self.touch(r.memory.id)
@@ -302,6 +404,8 @@ class MemoryStore:
                     self._conn.execute(
                         "UPDATE memories SET status = 'compacted' WHERE id = ?", (row["id"],)
                     )
+                    if self._vector_index is not None:
+                        self._vector_index.delete(row["id"])
                 self._conn.commit()
                 new_ids.append(new_id)
             return new_ids
