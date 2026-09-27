@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
+from collections import OrderedDict
 from typing import Callable, Iterable, Optional, Protocol
 
 
@@ -51,6 +53,35 @@ class HashingEmbedder:
             vec[idx] += sign
         norm = math.sqrt(sum(v * v for v in vec)) or 1.0
         return [v / norm for v in vec]
+
+
+class CachedEmbedder:
+    """Wraps any embedder with a small in-process LRU cache keyed on exact
+    text match. Most useful for the paid backends (Voyage/OpenAI), where a
+    repeated `recall()`/`build_context()` query would otherwise pay for and
+    wait on the same embedding call again.
+    """
+
+    def __init__(self, embedder: Embedder, maxsize: int = 256):
+        self._embedder = embedder
+        self._maxsize = maxsize
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+        self.dims = embedder.dims
+
+    def embed(self, text: str) -> list[float]:
+        with self._lock:
+            cached = self._cache.get(text)
+            if cached is not None:
+                self._cache.move_to_end(text)
+                return cached
+        vec = self._embedder.embed(text)
+        with self._lock:
+            self._cache[text] = vec
+            self._cache.move_to_end(text)
+            if len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+        return vec
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -138,12 +169,19 @@ _EMBEDDER_FACTORIES: dict[str, Callable[[Optional[str], Optional[str]], Embedder
 }
 
 
-def get_embedder(name: str = "hashing", model: Optional[str] = None, api_key: Optional[str] = None) -> Embedder:
+def get_embedder(
+    name: str = "hashing",
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+    cache_size: int = 256,
+) -> Embedder:
     """Build an embedder by name: 'hashing' (default, offline), 'voyage',
-    'openai', or 'sentence-transformers'.
+    'openai', or 'sentence-transformers'. Wrapped in a `CachedEmbedder`
+    unless `cache_size` is 0.
     """
     try:
         factory = _EMBEDDER_FACTORIES[name]
     except KeyError:
         raise ValueError(f"unknown embedder '{name}'; choose from {sorted(_EMBEDDER_FACTORIES)}") from None
-    return factory(model, api_key)
+    embedder = factory(model, api_key)
+    return CachedEmbedder(embedder, maxsize=cache_size) if cache_size > 0 else embedder

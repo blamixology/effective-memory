@@ -32,9 +32,17 @@ See [CHANGELOG.md](CHANGELOG.md) for what changed between versions.
 ## Install
 
 ```bash
+pip install effective-memory          # from PyPI
+pip install "effective-memory[web]"   # + REST API and web UI
+
+# or from source:
 pip install -e ".[dev]"        # core + tests
 pip install -e ".[dev,web]"    # + REST API and web UI
 ```
+
+A Docker image is also published to
+`ghcr.io/blamixology/effective-memory` on each tagged release (see Docker
+and Releases below).
 
 ## Python API
 
@@ -141,11 +149,11 @@ configured entirely via env vars (`EFFECTIVE_MEMORY_DB`,
 
 ### Auth
 
-Every `/api/*` request requires an `X-API-Key` header matching
-`EFFECTIVE_MEMORY_API_KEY`. `emem serve` auto-generates and prints a key on
-startup only if the env var was never set at all; an *explicitly* empty
-value (as `docker-compose.yml` passes by default -- see Docker below) is
-treated as "auth intentionally disabled" and left alone, not overridden:
+Every `/api/*` request requires an `X-API-Key` header matching one of the
+keys in `EFFECTIVE_MEMORY_API_KEY`. `emem serve` auto-generates and prints
+a key on startup only if the env var was never set at all; an *explicitly*
+empty value (as `docker-compose.yml` passes by default -- see Docker below)
+is treated as "auth intentionally disabled" and left alone, not overridden:
 
 ```bash
 emem serve --db mem.db                          # nothing set -> prints a generated key
@@ -153,6 +161,18 @@ emem serve --db mem.db --api-key mykey          # pin your own key
 emem serve --db mem.db --no-auth                # disable auth (local/dev only)
 EFFECTIVE_MEMORY_API_KEY= emem serve --db mem.db  # explicit empty -> disabled too
 ```
+
+Pass `--api-key` more than once (or set `EFFECTIVE_MEMORY_API_KEY` to a
+comma-separated list) to accept several independent keys -- e.g. one per
+agent or integration, each getting its own rate-limit bucket since that's
+keyed on the header value:
+
+```bash
+emem serve --db mem.db --api-key agent-one-key --api-key agent-two-key
+```
+
+There's no separate key store or admin API -- keys live only in that env
+var/flag. "Revoking" a key means removing it from the list and restarting.
 
 The web UI prompts for the key on first use and remembers it in
 `localStorage`. `/`, its static assets, and `/healthz` stay unauthenticated
@@ -214,6 +234,15 @@ after switching** to re-embed every memory with the new one.
 
 For `emem serve`, set `EFFECTIVE_MEMORY_EMBEDDER` and
 `EFFECTIVE_MEMORY_EMBEDDING_MODEL` instead of the CLI flags.
+
+### Embedding cache
+
+Every embedder returned by `get_embedder()` is wrapped in a small in-process
+LRU cache (256 entries by default) keyed on exact text match, so a repeated
+`recall()`/`build_context()` query -- or re-adding identical content --
+doesn't pay for and wait on the same embedding call again. This matters
+most for the paid backends. Tune or disable it with `--embedding-cache-size`
+(CLI) or `EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE` (API); `0` disables it.
 
 ## Real LLM summarization for compaction
 
@@ -289,6 +318,8 @@ emem reindex                         # re-embed in place after switching --embed
 ## Docker
 
 ```bash
+docker pull ghcr.io/blamixology/effective-memory:latest   # published on each release
+# or build locally:
 docker build -t effective-memory .
 docker run -p 8000:8000 -v emem-data:/data effective-memory
 # or:
@@ -311,27 +342,54 @@ running container, all passing. CI now runs this same build-run-smoke-test
 sequence on every push and PR (see Tests below), so this doesn't stay true
 only as of when it was last checked by hand.
 
+## Releases
+
+Pushing a tag matching `v*` (e.g. `v0.2.0`) runs
+`.github/workflows/release.yml`:
+
+1. Confirms the tag matches `version` in `pyproject.toml` (refuses to
+   publish a mismatch).
+2. Builds the sdist/wheel and publishes to PyPI via
+   [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC,
+   no API token stored in the repo).
+3. Builds the Docker image and pushes
+   `ghcr.io/blamixology/effective-memory:<version>` and `:latest` to GHCR,
+   using the workflow's own `GITHUB_TOKEN` (no extra secret needed).
+
+**One-time setup required before the first release**: register this
+project on PyPI with a
+[trusted publisher](https://docs.pypi.org/trusted-publishers/adding-a-publisher/)
+pointing at this repo, the `release.yml` workflow, and a `pypi` GitHub
+Environment (create that environment under repo Settings → Environments if
+it doesn't exist). No PyPI account changes are needed for the Docker/GHCR
+side -- that just needs Actions to have package write permission, which is
+the default for `GITHUB_TOKEN` unless the repo has narrowed it.
+
+To cut a release: bump `version` in `pyproject.toml`, update
+`CHANGELOG.md`, commit, then `git tag vX.Y.Z && git push --tags`.
+
 ## Design
 
 - `embeddings.py` — pluggable `Embedder` protocol; ships a dependency-free
   `HashingEmbedder` (bag of hashed character trigrams) plus `VoyageEmbedder`,
-  `OpenAIEmbedder`, and `SentenceTransformerEmbedder`, selected via
-  `get_embedder(name, model)`. Swap in any other model by implementing
-  `embed(text) -> list[float]`.
+  `OpenAIEmbedder`, and `SentenceTransformerEmbedder`, selected and
+  LRU-cache-wrapped via `get_embedder(name, model, cache_size)`. Swap in
+  any other model by implementing `embed(text) -> list[float]`.
 - `decay.py` — the forgetting-curve math: `retention(elapsed, importance,
   access_count)`.
 - `summarizer.py` — `claude_summarizer()`, an LLM-backed summarizer for
   `compact()` (optional `llm` extra).
 - `vector_index.py` — `VectorIndex`, a sqlite-vec ANN wrapper `recall()` uses
   at scale (optional `vector-index` extra).
-- `store.py` — SQLite-backed `MemoryStore`: CRUD (`add`/`get`/`update`/
-  `delete`), linking, `recall`, `build_context`, `review_due`, `compact`,
-  `list_memories`/`count_memories`, `tags`, `export_data`/`import_data`,
-  `reindex`, `stats`.
+- `store.py` — SQLite-backed `MemoryStore` (WAL mode + a 30s busy timeout,
+  so a one-shot `emem <command>` and a running `emem serve` can share one
+  `--db` file): CRUD (`add`/`get`/`update`/`delete`), linking, `recall`,
+  `build_context`, `review_due`, `compact`, `list_memories`/
+  `count_memories`, `tags`, `export_data`/`import_data`, `reindex`, `stats`.
 - `ratelimit.py` — `TokenBucketLimiter`, the in-process rate limiter behind
   `/api/*`.
 - `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
-- `api.py` / `web/index.html` — FastAPI REST API (API-key auth + rate
+- `api.py` / `web/index.html` — FastAPI REST API (multi-key auth + rate
   limiting + input limits on `/api/*`) and a dependency-free vanilla-JS
   single-page UI on top of it (optional `web` extra).
 - `Dockerfile` / `docker-compose.yml` — containerized `emem serve` with a

@@ -309,3 +309,36 @@ def test_reindex_updates_embeddings_for_new_embedder():
         assert n == 1
         results = s.recall("ocean", k=1, touch_on_recall=False)
         assert results[0].memory.id == mid
+
+
+def test_file_backed_store_uses_wal_mode(tmp_path):
+    db_path = str(tmp_path / "wal_check.db")
+    with MemoryStore(db_path) as store:
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "wal"
+
+
+def test_journal_mode_pragma_is_a_noop_for_memory_stores():
+    with MemoryStore(":memory:") as store:
+        mode = store._conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode == "memory"
+
+
+def test_two_connections_to_the_same_file_dont_lock_each_other_out(tmp_path):
+    """Simulates `emem <command>` and `emem serve` sharing one --db file:
+    two separate MemoryStore instances (separate sqlite3 connections) must
+    both be able to write without a "database is locked" error.
+    """
+    db_path = str(tmp_path / "concurrent.db")
+    writer = MemoryStore(db_path)
+    reader = MemoryStore(db_path)
+    try:
+        writer.add("written by the first connection")
+        assert reader.count_memories() == 1
+
+        second_id = reader.add("written by the second connection")
+        assert writer.get(second_id) is not None
+        assert writer.count_memories() == 2
+    finally:
+        writer.close()
+        reader.close()

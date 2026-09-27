@@ -133,6 +133,44 @@ def test_serve_generates_key_only_when_unset(monkeypatch, db_path):
     cli.main(["--db", db_path, "serve", "--api-key", "mykey"])
     assert os.environ["EFFECTIVE_MEMORY_API_KEY"] == "mykey"
 
+    monkeypatch.delenv("EFFECTIVE_MEMORY_API_KEY", raising=False)
+    cli.main(["--db", db_path, "serve", "--api-key", "key-one", "--api-key", "key-two"])
+    assert os.environ["EFFECTIVE_MEMORY_API_KEY"] == "key-one,key-two"
+
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "should-be-overridden")
     cli.main(["--db", db_path, "serve", "--no-auth"])
     assert os.environ["EFFECTIVE_MEMORY_API_KEY"] == ""
+
+
+def test_serve_does_not_clobber_env_vars_when_flags_are_omitted(monkeypatch, db_path):
+    """Regression test: `emem serve` used to unconditionally rewrite every
+    EFFECTIVE_MEMORY_* env var from hardcoded argparse defaults, silently
+    destroying values set externally (e.g. by Docker/docker-compose) unless
+    the matching CLI flag was also passed. Defaults must fall back to the
+    env var instead, which requires reloading the module so its import-time
+    DEFAULT_* constants pick up the env vars set below.
+    """
+    pytest.importorskip("uvicorn")
+    import importlib
+
+    monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT", "50")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW", "30")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
+    monkeypatch.setenv("EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE", "10")
+
+    reloaded_cli = importlib.reload(cli)
+    try:
+        import uvicorn
+
+        monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+
+        reloaded_cli.main(["--db", db_path, "serve"])  # no matching flags passed
+        assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] == "50"
+        assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW"] == "30.0"
+        assert os.environ["EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE"] == "10"
+
+        # an explicit flag still overrides the env var
+        reloaded_cli.main(["--db", db_path, "serve", "--rate-limit", "5"])
+        assert os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] == "5"
+    finally:
+        importlib.reload(cli)  # restore normal module state for later tests

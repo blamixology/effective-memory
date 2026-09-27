@@ -38,10 +38,17 @@ from .embeddings import get_embedder
 from .store import MemoryStore
 
 DEFAULT_DB = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
+DEFAULT_EMBEDDER = os.environ.get("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
+DEFAULT_EMBEDDING_MODEL = os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_MODEL")
+DEFAULT_EMBEDDING_CACHE_SIZE = int(os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE", "256"))
+DEFAULT_VECTOR_INDEX = os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX", "") == "1"
+DEFAULT_VECTOR_INDEX_OVERFETCH = int(os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH", "50"))
+DEFAULT_RATE_LIMIT = int(os.environ.get("EFFECTIVE_MEMORY_RATE_LIMIT", "120"))
+DEFAULT_RATE_LIMIT_WINDOW = float(os.environ.get("EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW", "60"))
 
 
 def _open_store(args: argparse.Namespace) -> MemoryStore:
-    embedder = get_embedder(args.embedder, model=args.embedding_model)
+    embedder = get_embedder(args.embedder, model=args.embedding_model, cache_size=args.embedding_cache_size)
     return MemoryStore(
         args.db,
         embedder=embedder,
@@ -186,13 +193,14 @@ def _serve(args: argparse.Namespace) -> None:
     if args.vector_index:
         os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX"] = "1"
         os.environ["EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH"] = str(args.vector_index_overfetch)
+    os.environ["EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE"] = str(args.embedding_cache_size)
     os.environ["EFFECTIVE_MEMORY_RATE_LIMIT"] = str(args.rate_limit)
     os.environ["EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW"] = str(args.rate_limit_window)
 
     if args.no_auth:
         os.environ["EFFECTIVE_MEMORY_API_KEY"] = ""
     elif args.api_key:
-        os.environ["EFFECTIVE_MEMORY_API_KEY"] = args.api_key
+        os.environ["EFFECTIVE_MEMORY_API_KEY"] = ",".join(args.api_key)
     elif os.environ.get("EFFECTIVE_MEMORY_API_KEY") is None:
         # only generate one when the env var was never set at all -- an
         # explicitly empty value (e.g. from docker-compose) means "no auth"
@@ -207,23 +215,36 @@ def _serve(args: argparse.Namespace) -> None:
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    # Every default below falls back to the matching EFFECTIVE_MEMORY_*
+    # env var (like --db/DEFAULT_DB already did), not a hardcoded literal.
+    # `emem serve` unconditionally re-exports args.X into that same env var
+    # for the API process to read -- if the default were hardcoded instead,
+    # that write would silently clobber an env var set by Docker/compose
+    # whenever the matching flag isn't passed on the command line.
     parser.add_argument("--db", default=DEFAULT_DB, help="path to the SQLite store")
     parser.add_argument(
         "--embedder",
-        default="hashing",
+        default=DEFAULT_EMBEDDER,
         choices=["hashing", "voyage", "openai", "sentence-transformers"],
         help="embedding backend (default: hashing, dependency-free)",
     )
-    parser.add_argument("--embedding-model", default=None, help="model name for the chosen embedder")
+    parser.add_argument("--embedding-model", default=DEFAULT_EMBEDDING_MODEL, help="model name for the chosen embedder")
+    parser.add_argument(
+        "--embedding-cache-size",
+        type=int,
+        default=DEFAULT_EMBEDDING_CACHE_SIZE,
+        help="LRU cache size for repeated embed() calls (helps paid embedders); 0 disables it",
+    )
     parser.add_argument(
         "--vector-index",
         action="store_true",
+        default=DEFAULT_VECTOR_INDEX,
         help="use a sqlite-vec ANN index for recall() (requires the 'vector-index' extra)",
     )
     parser.add_argument(
         "--vector-index-overfetch",
         type=int,
-        default=50,
+        default=DEFAULT_VECTOR_INDEX_OVERFETCH,
         help="candidate pool size fetched from the index before decay re-ranking",
     )
 
@@ -307,15 +328,23 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="run the web UI + REST API (requires the 'web' extra)")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8000)
-    p_serve.add_argument("--api-key", default=None, help="require this key on the 'X-API-Key' header")
+    p_serve.add_argument(
+        "--api-key",
+        action="append",
+        default=None,
+        help="require this key on the 'X-API-Key' header; repeat for multiple independently "
+        "revocable keys (e.g. one per agent/integration)",
+    )
     p_serve.add_argument("--no-auth", action="store_true", help="disable API key auth (local/dev use only)")
     p_serve.add_argument(
         "--rate-limit",
         type=int,
-        default=120,
+        default=DEFAULT_RATE_LIMIT,
         help="max requests per --rate-limit-window per API key/IP on /api/*; 0 disables it",
     )
-    p_serve.add_argument("--rate-limit-window", type=float, default=60.0, help="rate limit window, in seconds")
+    p_serve.add_argument(
+        "--rate-limit-window", type=float, default=DEFAULT_RATE_LIMIT_WINDOW, help="rate limit window, in seconds"
+    )
     p_serve.set_defaults(func=_serve)
 
     args = parser.parse_args(argv)

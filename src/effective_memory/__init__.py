@@ -1,5 +1,5 @@
 from .decay import retention, strength
-from .embeddings import Embedder, HashingEmbedder, cosine_similarity
+from .embeddings import CachedEmbedder, Embedder, HashingEmbedder, cosine_similarity
 from .store import Memory, MemoryStore, RecallResult
 
 __all__ = [
@@ -8,9 +8,10 @@ __all__ = [
     "RecallResult",
     "Embedder",
     "HashingEmbedder",
+    "CachedEmbedder",
     "cosine_similarity",
     "retention",
     "strength",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

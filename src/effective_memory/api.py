@@ -12,9 +12,14 @@ Configuration (env vars, all optional):
     EFFECTIVE_MEMORY_DB                    path to the SQLite store
     EFFECTIVE_MEMORY_EMBEDDER              hashing | voyage | openai | sentence-transformers
     EFFECTIVE_MEMORY_EMBEDDING_MODEL       model name for the chosen embedder
-    EFFECTIVE_MEMORY_API_KEY               required on the "X-API-Key" header for
-                                            every /api/* request; set to "" to
-                                            disable auth (local/dev use only)
+    EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE  LRU cache size for repeated embed() calls
+                                            (default 256); "0" disables it
+    EFFECTIVE_MEMORY_API_KEY               comma-separated list of keys accepted on the
+                                            "X-API-Key" header for every /api/* request
+                                            (a single key works the same as before); set
+                                            to "" to disable auth (local/dev use only).
+                                            Revoke a key by removing it from the list and
+                                            restarting -- keys aren't stored anywhere else.
     EFFECTIVE_MEMORY_VECTOR_INDEX          "1" to use a sqlite-vec ANN index for
                                             recall() (requires the 'vector-index' extra)
     EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH  candidate pool size before decay re-ranking
@@ -48,7 +53,10 @@ MAX_METADATA_BYTES = 10_000
 DB_PATH = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
 EMBEDDER_NAME = os.environ.get("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
 EMBEDDING_MODEL = os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_MODEL")
-API_KEY = os.environ.get("EFFECTIVE_MEMORY_API_KEY")  # unset or "" disables auth
+EMBEDDING_CACHE_SIZE = int(os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_CACHE_SIZE", "256"))
+# unset or "" disables auth; comma-separated for multiple independently
+# revocable keys (e.g. one per agent/integration)
+API_KEYS = [k.strip() for k in (os.environ.get("EFFECTIVE_MEMORY_API_KEY") or "").split(",") if k.strip()]
 VECTOR_INDEX = os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX", "") == "1"
 VECTOR_INDEX_OVERFETCH = int(os.environ.get("EFFECTIVE_MEMORY_VECTOR_INDEX_OVERFETCH", "50"))
 RATE_LIMIT = int(os.environ.get("EFFECTIVE_MEMORY_RATE_LIMIT", "120"))
@@ -58,7 +66,7 @@ _STATIC_DIR = Path(__file__).parent / "web"
 app = FastAPI(title="effective-memory", description="A local-first memory engine.")
 store = MemoryStore(
     DB_PATH,
-    embedder=get_embedder(EMBEDDER_NAME, model=EMBEDDING_MODEL),
+    embedder=get_embedder(EMBEDDER_NAME, model=EMBEDDING_MODEL, cache_size=EMBEDDING_CACHE_SIZE),
     vector_index=VECTOR_INDEX,
     vector_index_overfetch=VECTOR_INDEX_OVERFETCH,
 )
@@ -75,9 +83,9 @@ _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None:
-    if not API_KEY:
+    if not API_KEYS:
         return  # auth disabled
-    if not provided or not secrets.compare_digest(provided, API_KEY):
+    if not provided or not any(secrets.compare_digest(provided, key) for key in API_KEYS):
         raise HTTPException(status_code=401, detail="missing or invalid X-API-Key header")
 
 
@@ -309,9 +317,11 @@ def config() -> dict:
         "embedder": EMBEDDER_NAME,
         "embedding_model": EMBEDDING_MODEL,
         "embedding_dims": store.embedder.dims,
+        "embedding_cache_size": EMBEDDING_CACHE_SIZE,
         "vector_index": VECTOR_INDEX,
         "vector_index_overfetch": VECTOR_INDEX_OVERFETCH if VECTOR_INDEX else None,
-        "auth_enabled": bool(API_KEY),
+        "auth_enabled": bool(API_KEYS),
+        "api_key_count": len(API_KEYS),
         "rate_limit": {"requests": RATE_LIMIT, "window_seconds": RATE_LIMIT_WINDOW} if _rate_limiter else None,
     }
 

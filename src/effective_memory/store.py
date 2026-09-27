@@ -128,9 +128,15 @@ class MemoryStore:
         self.half_life = half_life
         self._clock = clock
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30.0)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # WAL mode lets readers and writers avoid blocking each other -- this
+        # matters because `emem <command>` (a one-shot process) and a running
+        # `emem serve` are both expected to hit the same --db file. A no-op
+        # on ":memory:" databases, which always report back "memory" mode.
+        self._conn.execute("PRAGMA journal_mode = WAL")
+        self._conn.execute("PRAGMA busy_timeout = 30000")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
