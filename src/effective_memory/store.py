@@ -453,3 +453,116 @@ class MemoryStore:
             total = sum(by_status.values())
             links = self._conn.execute("SELECT COUNT(*) as n FROM links").fetchone()["n"]
             return {"total": total, "by_status": by_status, "links": links}
+
+    def tags(self) -> list[tuple[str, int]]:
+        """Distinct tags across all memories, with counts, most-used first."""
+        with self._lock:
+            counts: dict[str, int] = {}
+            for row in self._conn.execute("SELECT tags FROM memories"):
+                for tag in json.loads(row["tags"]):
+                    counts[tag] = counts.get(tag, 0) + 1
+            return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    # -- backup / restore --------------------------------------------------
+
+    def export_data(self) -> dict:
+        """Dump every memory and link as plain data (no embeddings -- those
+        are re-derived on import, since they're tied to whichever embedder
+        made them).
+        """
+        with self._lock:
+            memories = self._conn.execute("SELECT * FROM memories ORDER BY id").fetchall()
+            links = self._conn.execute("SELECT src_id, dst_id, relation FROM links ORDER BY id").fetchall()
+            return {
+                "version": 1,
+                "exported_at": self._clock(),
+                "memories": [
+                    {
+                        "id": row["id"],
+                        "content": row["content"],
+                        "tags": json.loads(row["tags"]),
+                        "source": row["source"],
+                        "metadata": json.loads(row["metadata"]),
+                        "importance": row["importance"],
+                        "created_at": row["created_at"],
+                        "last_accessed": row["last_accessed"],
+                        "access_count": row["access_count"],
+                        "status": row["status"],
+                    }
+                    for row in memories
+                ],
+                "links": [
+                    {"src_id": row["src_id"], "dst_id": row["dst_id"], "relation": row["relation"]}
+                    for row in links
+                ],
+            }
+
+    def import_data(self, data: dict, reset: bool = False) -> dict:
+        """Load an export_data() dump, re-embedding every memory with the
+        current embedder. If `reset` is True, existing data is wiped first;
+        otherwise memories are appended with fresh IDs (links and any
+        `metadata.compacted_from` references are remapped to match).
+        """
+        with self._lock:
+            if reset:
+                self._conn.execute("DELETE FROM links")
+                self._conn.execute("DELETE FROM memories")
+                if self._vector_index is not None:
+                    self._vector_index.clear()
+                self._conn.commit()
+
+            id_map: dict[int, int] = {}
+            for mem in data.get("memories", []):
+                metadata = dict(mem.get("metadata") or {})
+                if "compacted_from" in metadata:
+                    metadata["compacted_from"] = [id_map.get(i, i) for i in metadata["compacted_from"]]
+
+                embedding = self.embedder.embed(mem["content"])
+                now = self._clock()
+                cur = self._conn.execute(
+                    "INSERT INTO memories (content, embedding, tags, source, metadata, importance, "
+                    "created_at, last_accessed, access_count, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        mem["content"],
+                        json.dumps(embedding),
+                        json.dumps(mem.get("tags", [])),
+                        mem.get("source"),
+                        json.dumps(metadata),
+                        mem.get("importance", 1.0),
+                        mem.get("created_at", now),
+                        mem.get("last_accessed", now),
+                        mem.get("access_count", 0),
+                        mem.get("status", "active"),
+                    ),
+                )
+                new_id = cur.lastrowid
+                id_map[mem["id"]] = new_id
+                if self._vector_index is not None and mem.get("status", "active") == "active":
+                    self._vector_index.upsert(new_id, embedding)
+
+            imported_links = 0
+            for link in data.get("links", []):
+                src, dst = id_map.get(link["src_id"]), id_map.get(link["dst_id"])
+                if src is not None and dst is not None:
+                    self._conn.execute(
+                        "INSERT INTO links (src_id, dst_id, relation) VALUES (?, ?, ?)",
+                        (src, dst, link.get("relation", "related")),
+                    )
+                    imported_links += 1
+            self._conn.commit()
+            return {"memories": len(id_map), "links": imported_links}
+
+    def reindex(self) -> int:
+        """Re-embed every memory's content with the current embedder and
+        refresh the vector index. Use this after switching --embedder on a
+        store that already has data.
+        """
+        with self._lock:
+            rows = self._conn.execute("SELECT id, content, status FROM memories").fetchall()
+            for row in rows:
+                embedding = self.embedder.embed(row["content"])
+                self._conn.execute("UPDATE memories SET embedding = ? WHERE id = ?", (json.dumps(embedding), row["id"]))
+                if self._vector_index is not None and row["status"] == "active":
+                    self._vector_index.upsert(row["id"], embedding)
+            self._conn.commit()
+            return len(rows)

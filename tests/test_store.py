@@ -208,3 +208,74 @@ def test_count_memories(store):
     store.add("b")
     assert store.count_memories() == 2
     assert store.count_memories(tag="x") == 1
+
+
+def test_tags_counts_and_orders_by_frequency(store):
+    store.add("a", tags=["work", "urgent"])
+    store.add("b", tags=["work"])
+    store.add("c", tags=["personal"])
+    assert store.tags() == [("work", 2), ("personal", 1), ("urgent", 1)]
+
+
+def test_export_import_roundtrip(store):
+    a = store.add("Alice works at Acme", tags=["people"], importance=1.5)
+    b = store.add("Acme is a software company", tags=["company"])
+    store.link(a, b, relation="works_at")
+
+    dump = store.export_data()
+    assert len(dump["memories"]) == 2
+    assert len(dump["links"]) == 1
+
+    with MemoryStore(":memory:") as fresh:
+        result = fresh.import_data(dump)
+        assert result == {"memories": 2, "links": 1}
+
+        imported = fresh.list_memories(status="all")
+        contents = {m.content for m in imported}
+        assert contents == {"Alice works at Acme", "Acme is a software company"}
+
+        alice = next(m for m in imported if m.content.startswith("Alice"))
+        assert alice.tags == ["people"]
+        assert alice.importance == 1.5
+
+        links = fresh.links_for(alice.id)
+        assert len(links) == 1
+        assert links[0][0] == "works_at"
+
+
+def test_import_remaps_compacted_from_ids(store, clock):
+    store.add("the user likes coffee in the morning")
+    store.add("the user prefers coffee at breakfast")
+    clock.advance(120 * 24 * 3600)
+    store.compact(retention_threshold=0.99, cluster_similarity=0.3)
+    dump = store.export_data()
+
+    with MemoryStore(":memory:") as fresh:
+        # add a memory first so imported IDs diverge from the export's IDs,
+        # actually exercising the remap instead of an identity mapping
+        fresh.add("padding memory so IDs diverge from the export")
+        fresh.import_data(dump)
+
+        summary = next(m for m in fresh.list_memories(status="active") if m.metadata.get("compacted_from"))
+        compacted_ids = {m.id for m in fresh.list_memories(status="compacted")}
+        assert set(summary.metadata["compacted_from"]) == compacted_ids
+
+
+def test_import_reset_replaces_existing_data(store):
+    store.add("will be wiped")
+    dump = {"version": 1, "memories": [{"id": 1, "content": "replacement"}], "links": []}
+    store.import_data(dump, reset=True)
+    contents = [m.content for m in store.list_memories(status="all")]
+    assert contents == ["replacement"]
+
+
+def test_reindex_updates_embeddings_for_new_embedder():
+    from effective_memory.embeddings import HashingEmbedder
+
+    with MemoryStore(":memory:", embedder=HashingEmbedder(dims=64)) as s:
+        mid = s.add("a fact about the ocean")
+        s.embedder = HashingEmbedder(dims=64)  # simulate switching embedders
+        n = s.reindex()
+        assert n == 1
+        results = s.recall("ocean", k=1, touch_on_recall=False)
+        assert results[0].memory.id == mid

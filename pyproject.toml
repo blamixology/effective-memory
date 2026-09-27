@@ -7,12 +7,12 @@ name = "effective-memory"
 version = "0.1.0"
 description = "A local-first memory engine: semantic recall for agents, a linkable personal knowledge store, and forgetting-curve-based compaction."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "httpx2"]
 web = ["fastapi>=0.100", "uvicorn[standard]>=0.23"]
 voyage = ["voyageai>=0.2"]
 openai = ["openai>=1.0"]

@@ -6,8 +6,12 @@
     emem update ID [--content ...] [--tags a,b] [--source name] [--importance 1.0]
     emem delete ID
     emem list [--status active|compacted|all] [--tag TAG] [--limit 50] [--offset 0]
+    emem tags
     emem review [--threshold 0.3] [--limit 10]
     emem compact [--threshold 0.15] [--summarizer none|claude] [--summarizer-model NAME]
+    emem export [--out FILE]
+    emem import FILE [--reset]
+    emem reindex
     emem stats
     emem serve [--host 127.0.0.1] [--port 8000] [--api-key KEY | --no-auth]
 
@@ -25,6 +29,7 @@ more than a few thousand memories (requires the 'vector-index' extra).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -80,6 +85,42 @@ def _list(args: argparse.Namespace) -> None:
         for m in items:
             print(f"(#{m.id}, {m.status}) {m.content}")
         print(f"-- {args.offset + len(items)}/{total} --")
+
+
+def _tags(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        pairs = store.tags()
+        if not pairs:
+            print("(no tags yet)")
+            return
+        for tag, count in pairs:
+            print(f"{tag}\t{count}")
+
+
+def _export(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        dump = store.export_data()
+        text = json.dumps(dump, indent=2)
+        if args.out:
+            with open(args.out, "w") as f:
+                f.write(text)
+            print(f"exported {len(dump['memories'])} memories, {len(dump['links'])} links to {args.out}")
+        else:
+            print(text)
+
+
+def _import(args: argparse.Namespace) -> None:
+    with open(args.file) as f:
+        dump = json.load(f)
+    with _open_store(args) as store:
+        result = store.import_data(dump, reset=args.reset)
+        print(f"imported {result['memories']} memories, {result['links']} links")
+
+
+def _reindex(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        n = store.reindex()
+        print(f"reindexed {n} memories with the '{args.embedder}' embedder")
 
 
 def _recall(args: argparse.Namespace) -> None:
@@ -212,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
     p_list.add_argument("--offset", type=int, default=0)
     p_list.set_defaults(func=_list)
 
+    p_tags = sub.add_parser("tags", help="list distinct tags with counts")
+    p_tags.set_defaults(func=_tags)
+
     p_recall = sub.add_parser("recall", help="semantically search memories")
     p_recall.add_argument("query")
     p_recall.add_argument("--k", type=int, default=5)
@@ -238,6 +282,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_compact.add_argument("--summarizer-model", default=None, help="model name when --summarizer=claude")
     p_compact.set_defaults(func=_compact)
+
+    p_export = sub.add_parser("export", help="dump all memories and links as JSON")
+    p_export.add_argument("--out", default=None, help="write to this file instead of stdout")
+    p_export.set_defaults(func=_export)
+
+    p_import = sub.add_parser("import", help="load memories and links from an export_data() JSON dump")
+    p_import.add_argument("file")
+    p_import.add_argument("--reset", action="store_true", help="wipe existing data first")
+    p_import.set_defaults(func=_import)
+
+    p_reindex = sub.add_parser("reindex", help="re-embed every memory with the current --embedder")
+    p_reindex.set_defaults(func=_reindex)
 
     p_stats = sub.add_parser("stats", help="show store statistics")
     p_stats.set_defaults(func=_stats)

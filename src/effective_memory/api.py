@@ -97,6 +97,12 @@ class CompactRequest(BaseModel):
     summarizer_model: Optional[str] = None
 
 
+class ImportRequest(BaseModel):
+    version: int = 1
+    memories: list[dict] = []
+    links: list[dict] = []
+
+
 def _memory_out(m: Memory) -> dict:
     return {
         "id": m.id,
@@ -220,6 +226,26 @@ def compact(req: CompactRequest) -> dict:
 @api.get("/stats")
 def stats() -> dict:
     return store.stats()
+
+
+@api.get("/tags")
+def tags() -> list[dict]:
+    return [{"tag": tag, "count": count} for tag, count in store.tags()]
+
+
+@api.get("/export")
+def export_data() -> dict:
+    return store.export_data()
+
+
+@api.post("/import")
+def import_data(req: ImportRequest, reset: bool = False) -> dict:
+    return store.import_data(req.model_dump(), reset=reset)
+
+
+@api.post("/reindex")
+def reindex() -> dict:
+    return {"reindexed": store.reindex()}
 
 
 @api.get("/config")

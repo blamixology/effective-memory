@@ -74,6 +74,10 @@ emem context "summarize what I know about the user" --budget 300
 emem review --threshold 0.3
 emem compact --threshold 0.15
 emem list --status active --tag preference
+emem tags
+emem export --out backup.json
+emem import backup.json
+emem reindex
 emem stats
 ```
 
@@ -103,19 +107,27 @@ under `/api/*`:
 | GET    | `/api/review?threshold=0.3` | spaced-repetition review queue    |
 | POST   | `/api/compact`          | cluster + summarize decayed memories (`summarizer: "none"\|"claude"`) |
 | GET    | `/api/stats`            | store statistics                      |
+| GET    | `/api/tags`             | distinct tags with counts, most-used first |
+| GET    | `/api/export`           | dump all memories + links as JSON     |
+| POST   | `/api/import?reset=false` | load a JSON dump, re-embedding every memory |
+| POST   | `/api/reindex`          | re-embed every memory with the current embedder |
 | GET    | `/api/config`           | active embedder, dims, vector-index and auth state |
 
 The UI has seven tabs:
 
 - **Browse** (the default tab) — paginated list of every memory,
-  filterable by status (`active`/`compacted`/`all`) and tag. A compacted
-  summary shows which original memories it was built from.
+  filterable by status (`active`/`compacted`/`all`) and tag (autocompleted
+  from `/api/tags`). A compacted summary shows which original memories it
+  was built from.
 - **Add** / **Recall** / **Context** / **Review** / **Compact** — as before.
 - **Manage** — load a memory by ID to edit or delete it, and see/add its
   outgoing links (the knowledge-graph side of the tool, otherwise only
   reachable via the API).
-- **Stats** — counts plus a **Configuration** panel (DB path, embedder +
-  model, embedding dimensions, vector-index state, auth state).
+- **Stats** — counts, a **Configuration** panel (DB path, embedder + model,
+  embedding dimensions, vector-index state, auth state), and a
+  **Backup & embedder migration** section: export/download a JSON backup,
+  import one (optionally wiping existing data first), or reindex everything
+  after switching embedders.
 
 Every card everywhere (Browse, Recall, Review) has a delete (✕) button.
 
@@ -162,9 +174,10 @@ emem --embedder sentence-transformers stats    # fully local, no API key
 | `sentence-transformers`  | local model, no network at inference time | `sentence-transformers` extra |
 
 Use `--embedding-model` to pick a specific model name for the chosen
-backend. **Use the same embedder consistently for a given `--db`** — vectors
-from different embedders aren't comparable, so switching mid-store silently
-breaks recall for anything added under the old one.
+backend. Vectors from different embedders aren't comparable, so switching
+`--embedder` on an existing store silently breaks recall for anything added
+under the old one -- **run `emem reindex` (or `POST /api/reindex`) right
+after switching** to re-embed every memory with the new one.
 
 For `emem serve`, set `EFFECTIVE_MEMORY_EMBEDDER` and
 `EFFECTIVE_MEMORY_EMBEDDING_MODEL` instead of the CLI flags.
@@ -210,6 +223,24 @@ already has data triggers a one-time backfill on open. The embedding
 dimension is fixed at index-creation time, so this inherits the existing
 "pick one embedder per `--db`" rule.
 
+## Backup, restore, and embedder migration
+
+`export_data()`/`import_data()` (Python), `emem export`/`emem import`
+(CLI), and `/api/export`/`/api/import` (API, plus a button in the web UI's
+Stats tab) dump and restore everything as plain JSON -- memories, tags,
+metadata, and links, but not embeddings, since those are re-derived from
+content on import using whatever embedder is currently configured. That
+also makes import the supported way to move a store to a new embedder
+wholesale (export, switch `--embedder`, import into a fresh `--db`), and
+`reindex()` the way to do it in place on the same store.
+
+```bash
+emem export --out backup.json
+emem import backup.json              # appended with fresh IDs
+emem import backup.json --reset      # replaces existing data entirely
+emem reindex                         # re-embed in place after switching --embedder
+```
+
 ## Docker
 
 ```bash
@@ -240,7 +271,8 @@ in the container.
   at scale (optional `vector-index` extra).
 - `store.py` — SQLite-backed `MemoryStore`: CRUD (`add`/`get`/`update`/
   `delete`), linking, `recall`, `build_context`, `review_due`, `compact`,
-  `stats`.
+  `list_memories`/`count_memories`, `tags`, `export_data`/`import_data`,
+  `reindex`, `stats`.
 - `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
 - `api.py` / `web/index.html` — FastAPI REST API (API-key auth on `/api/*`)
   and a dependency-free vanilla-JS single-page UI on top of it (optional
@@ -251,5 +283,11 @@ in the container.
 ## Tests
 
 ```bash
+pip install -e ".[dev,web]"   # httpx2 + fastapi needed for the API integration tests
 pytest -q
 ```
+
+CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10-3.12 on every
+push and PR. Tests for optional extras (voyage/openai/sentence-transformers/
+llm/vector-index) skip themselves gracefully when that extra isn't
+installed.

@@ -146,7 +146,8 @@
         <option value="compacted">compacted</option>
         <option value="all">all</option>
       </select>
-      <input type="text" id="browse-tag" placeholder="filter by tag" style="max-width:180px" />
+      <input type="text" id="browse-tag" placeholder="filter by tag" list="tag-list" style="max-width:180px" />
+      <datalist id="tag-list"></datalist>
       <button class="action" onclick="browseMemories(0)">Refresh</button>
     </div>
     <div id="browse-results"></div>
@@ -246,6 +247,17 @@
     <div class="stat-grid" id="stats-out"></div>
     <div class="sub" style="margin:20px 0 8px">Configuration</div>
     <div id="config-out"></div>
+    <div class="sub" style="margin:20px 0 8px">Backup &amp; embedder migration</div>
+    <div class="row">
+      <button class="action" onclick="exportData()">Export JSON</button>
+      <input type="file" id="import-file" accept="application/json" style="max-width:220px" />
+      <label style="align-self:center;color:var(--muted);font-size:13px">
+        <input type="checkbox" id="import-reset" /> replace existing data
+      </label>
+      <button class="action" onclick="importData()">Import</button>
+      <button class="action" onclick="reindexData()">Reindex</button>
+    </div>
+    <div id="data-result" class="empty"></div>
   </section>
 
 </main>
@@ -264,7 +276,14 @@ document.querySelectorAll('nav button').forEach(btn => {
 });
 
 // load the Browse tab on first page load too, since it's the default tab
-window.addEventListener('DOMContentLoaded', () => browseMemories(0));
+window.addEventListener('DOMContentLoaded', () => { browseMemories(0); loadTagList(); });
+
+async function loadTagList() {
+  const res = await apiFetch('/api/tags');
+  if (!res.ok) return;
+  const tags = await res.json();
+  $('tag-list').innerHTML = tags.map(t => `<option value="${t.tag}">`).join('');
+}
 
 function retentionBar(r) {
   const pct = Math.round(r * 100);
@@ -365,6 +384,7 @@ async function addMemory() {
   $('add-content').value = '';
   $('add-tags').value = '';
   $('add-source').value = '';
+  loadTagList();
 }
 
 async function doRecall() {
@@ -507,6 +527,45 @@ async function loadStats() {
   $('config-out').innerHTML = `<div class="card">${rows.map(([k, v]) =>
     `<div class="meta" style="justify-content:space-between"><span>${k}</span><span>${v}</span></div>`
   ).join('')}</div>`;
+}
+
+async function exportData() {
+  const res = await apiFetch('/api/export');
+  if (!res.ok) { $('data-result').textContent = `error: ${res.statusText}`; return; }
+  const data = await res.json();
+  const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'effective-memory-export.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $('data-result').textContent = `exported ${data.memories.length} memories, ${data.links.length} links`;
+}
+
+async function importData() {
+  const fileInput = $('import-file');
+  if (!fileInput.files.length) { $('data-result').textContent = 'choose a file first'; return; }
+  const reset = $('import-reset').checked;
+  const text = await fileInput.files[0].text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { $('data-result').textContent = 'invalid JSON file'; return; }
+
+  const res = await apiFetch(`/api/import?reset=${reset}`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(data)
+  });
+  if (!res.ok) { $('data-result').textContent = `error: ${res.statusText}`; return; }
+  const result = await res.json();
+  $('data-result').textContent = `imported ${result.memories} memories, ${result.links} links`;
+  loadStats();
+  loadTagList();
+}
+
+async function reindexData() {
+  const res = await apiFetch('/api/reindex', {method: 'POST'});
+  if (!res.ok) { $('data-result').textContent = `error: ${res.statusText}`; return; }
+  const result = await res.json();
+  $('data-result').textContent = `reindexed ${result.reindexed} memories`;
 }
 </script>
 </body>
