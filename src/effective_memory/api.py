@@ -35,7 +35,6 @@ import json
 import os
 import secrets
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Security
 from fastapi.responses import FileResponse
@@ -82,7 +81,7 @@ def healthz() -> dict:
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
-def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None:
+def require_api_key(provided: str | None = Security(_api_key_header)) -> None:
     if not API_KEYS:
         return  # auth disabled
     if not provided or not any(secrets.compare_digest(provided, key) for key in API_KEYS):
@@ -94,7 +93,7 @@ _rate_limiter = (
 )
 
 
-def enforce_rate_limit(request: Request, provided: Optional[str] = Security(_api_key_header)) -> None:
+def enforce_rate_limit(request: Request, provided: str | None = Security(_api_key_header)) -> None:
     if _rate_limiter is None:
         return
     key = provided or (request.client.host if request.client else "unknown")
@@ -108,7 +107,7 @@ api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key), Depends(e
 # -- schemas --------------------------------------------------------------
 
 
-def _check_metadata_size(v: Optional[dict]) -> Optional[dict]:
+def _check_metadata_size(v: dict | None) -> dict | None:
     if v and len(json.dumps(v)) > MAX_METADATA_BYTES:
         raise ValueError(f"metadata too large (max {MAX_METADATA_BYTES} bytes serialized)")
     return v
@@ -117,7 +116,7 @@ def _check_metadata_size(v: Optional[dict]) -> Optional[dict]:
 class AddRequest(BaseModel):
     content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
     tags: list[str] = Field(default=[], max_length=100)
-    source: Optional[str] = Field(None, max_length=200)
+    source: str | None = Field(None, max_length=200)
     importance: float = Field(1.0, ge=0.0, le=100.0)
     metadata: dict = {}
 
@@ -125,11 +124,11 @@ class AddRequest(BaseModel):
 
 
 class UpdateRequest(BaseModel):
-    content: Optional[str] = Field(None, min_length=1, max_length=MAX_CONTENT_LENGTH)
-    tags: Optional[list[str]] = Field(None, max_length=100)
-    source: Optional[str] = Field(None, max_length=200)
-    importance: Optional[float] = Field(None, ge=0.0, le=100.0)
-    metadata: Optional[dict] = None
+    content: str | None = Field(None, min_length=1, max_length=MAX_CONTENT_LENGTH)
+    tags: list[str] | None = Field(None, max_length=100)
+    source: str | None = Field(None, max_length=200)
+    importance: float | None = Field(None, ge=0.0, le=100.0)
+    metadata: dict | None = None
 
     _validate_metadata = field_validator("metadata")(_check_metadata_size)
 
@@ -144,7 +143,7 @@ class CompactRequest(BaseModel):
     retention_threshold: float = Field(0.15, ge=0.0, le=1.0)
     cluster_similarity: float = Field(0.75, ge=-1.0, le=1.0)
     summarizer: str = "none"  # "none" or "claude"
-    summarizer_model: Optional[str] = None
+    summarizer_model: str | None = None
 
 
 class ImportRequest(BaseModel):
@@ -190,8 +189,8 @@ def add_memory(req: AddRequest) -> dict:
 
 @api.get("/memories")
 def list_memories(
-    status: Optional[str] = None,
-    tag: Optional[str] = None,
+    status: str | None = None,
+    tag: str | None = None,
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> dict:

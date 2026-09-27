@@ -8,7 +8,7 @@ from fastapi import HTTPException
 def api_module(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "auth_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "expected-key")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     yield api
@@ -34,7 +34,7 @@ def test_correct_key_accepted(api_module):
 def test_auth_disabled_when_key_unset(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "noauth_test.db"))
     monkeypatch.delenv("EFFECTIVE_MEMORY_API_KEY", raising=False)
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:
@@ -46,7 +46,7 @@ def test_auth_disabled_when_key_unset(monkeypatch, tmp_path):
 def test_multiple_keys_each_accepted_independently(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "multikey_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "agent-one-key, agent-two-key")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:

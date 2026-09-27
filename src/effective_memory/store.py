@@ -18,8 +18,9 @@ import re
 import sqlite3
 import threading
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Sequence
+from typing import Any
 
 from .decay import DEFAULT_HALF_LIFE_SECONDS, retention
 from .embeddings import Embedder, HashingEmbedder, cosine_similarity
@@ -58,7 +59,7 @@ class Memory:
     id: int
     content: str
     tags: list[str]
-    source: Optional[str]
+    source: str | None
     metadata: dict
     importance: float
     created_at: float
@@ -118,7 +119,7 @@ class MemoryStore:
     def __init__(
         self,
         path: str = "effective_memory.db",
-        embedder: Optional[Embedder] = None,
+        embedder: Embedder | None = None,
         half_life: float = DEFAULT_HALF_LIFE_SECONDS,
         clock: Callable[[], float] = time.time,
         vector_index: bool = False,
@@ -141,7 +142,7 @@ class MemoryStore:
         self._conn.commit()
 
         self._vector_index_overfetch = vector_index_overfetch
-        self._vector_index: Optional[VectorIndex] = None
+        self._vector_index: VectorIndex | None = None
         if vector_index:
             index = VectorIndex(self._conn, dims=self.embedder.dims)
             self._sync_vector_index(index)
@@ -162,7 +163,7 @@ class MemoryStore:
     def close(self) -> None:
         self._conn.close()
 
-    def __enter__(self) -> "MemoryStore":
+    def __enter__(self) -> MemoryStore:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -173,10 +174,10 @@ class MemoryStore:
     def add(
         self,
         content: str,
-        tags: Optional[list[str]] = None,
-        source: Optional[str] = None,
+        tags: list[str] | None = None,
+        source: str | None = None,
         importance: float = 1.0,
-        metadata: Optional[dict] = None,
+        metadata: dict | None = None,
     ) -> int:
         with self._lock:
             now = self._clock()
@@ -207,11 +208,11 @@ class MemoryStore:
     def update(
         self,
         memory_id: int,
-        content: Optional[str] = None,
-        tags: Optional[list[str]] = None,
-        source: Optional[str] = None,
-        importance: Optional[float] = None,
-        metadata: Optional[dict] = None,
+        content: str | None = None,
+        tags: list[str] | None = None,
+        source: str | None = None,
+        importance: float | None = None,
+        metadata: dict | None = None,
     ) -> None:
         """Edit a memory in place. Re-embeds and re-indexes when `content`
         changes; other fields are updated as given, left alone otherwise.
@@ -282,12 +283,12 @@ class MemoryStore:
 
     # -- reading -------------------------------------------------------------
 
-    def get(self, memory_id: int) -> Optional[Memory]:
+    def get(self, memory_id: int) -> Memory | None:
         with self._lock:
             row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
             return _row_to_memory(row) if row else None
 
-    def _list_filters(self, status: Optional[str], tag: Optional[str]) -> tuple[str, list]:
+    def _list_filters(self, status: str | None, tag: str | None) -> tuple[str, list]:
         clauses, params = [], []
         if status and status != "all":
             clauses.append("status = ?")
@@ -300,8 +301,8 @@ class MemoryStore:
 
     def list_memories(
         self,
-        status: Optional[str] = None,
-        tag: Optional[str] = None,
+        status: str | None = None,
+        tag: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> list[Memory]:
@@ -316,7 +317,7 @@ class MemoryStore:
             ).fetchall()
             return [_row_to_memory(row) for row in rows]
 
-    def count_memories(self, status: Optional[str] = None, tag: Optional[str] = None) -> int:
+    def count_memories(self, status: str | None = None, tag: str | None = None) -> int:
         with self._lock:
             where, params = self._list_filters(status, tag)
             return self._conn.execute(f"SELECT COUNT(*) FROM memories{where}", params).fetchone()[0]
@@ -448,7 +449,7 @@ class MemoryStore:
         self,
         retention_threshold: float = 0.15,
         cluster_similarity: float = 0.75,
-        summarizer: Optional[Callable[[list[str]], str]] = None,
+        summarizer: Callable[[list[str]], str] | None = None,
     ) -> list[int]:
         """Cluster decayed memories by semantic similarity and replace each
         cluster with one summary memory, marking the originals 'compacted'.
@@ -489,7 +490,7 @@ class MemoryStore:
                 merged_importance = max(row["importance"] for row in cluster)
                 new_id = self.add(
                     summary_text,
-                    tags=sorted(set(sum((json.loads(row["tags"]) for row in cluster), []))),
+                    tags=sorted({tag for row in cluster for tag in json.loads(row["tags"])}),
                     source="compaction",
                     importance=merged_importance,
                     metadata={"compacted_from": [row["id"] for row in cluster]},

@@ -34,6 +34,18 @@ effective_memory = ["web/*.html"]
 line-length = 120
 target-version = "py310"
 
+[tool.ruff.lint]
+# Pinned explicitly rather than left to ruff's defaults: a ruff upgrade
+# (0.15 -> 0.16) silently expanded its default rule set and broke CI on
+# code nothing here had changed. This list is deliberately chosen and only
+# grows when a rule is reviewed and added on purpose.
+select = [
+    "E4", "E7", "E9", "F", # ruff's own stable defaults (pyflakes + a few pycodestyle checks)
+    "UP035", "UP037", "UP045", # pyupgrade: modern typing syntax (repo requires Python >=3.10)
+    "RUF017", "RUF022", # ruff-specific: quadratic list build, unsorted __all__
+    "PLR0402", # `import x.y as y` -> `from x import y`
+]
+
 [tool.mypy]
 ignore_missing_imports = true
 python_version = "3.10"

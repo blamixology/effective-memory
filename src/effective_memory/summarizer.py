@@ -8,12 +8,12 @@ every distinct fact, so compaction genuinely bounds context/storage size.
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 DEFAULT_MODEL = "claude-opus-5"
 
 
-def claude_summarizer(model: str = DEFAULT_MODEL, api_key: Optional[str] = None) -> Callable[[list[str]], str]:
+def claude_summarizer(model: str = DEFAULT_MODEL, api_key: str | None = None) -> Callable[[list[str]], str]:
     """Build a summarizer callable backed by the Claude API.
 
     Requires the 'llm' extra. Pass the returned callable as

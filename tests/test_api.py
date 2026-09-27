@@ -12,7 +12,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "api_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "")
     monkeypatch.delenv("EFFECTIVE_MEMORY_VECTOR_INDEX", raising=False)
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     with TestClient(api.app) as c:
@@ -158,7 +158,7 @@ def test_rate_limit_returns_429_once_exhausted(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "")
     monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT", "3")
     monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT_WINDOW", "60")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:
@@ -174,7 +174,7 @@ def test_rate_limit_disabled_when_zero(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "ratelimit_off.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "")
     monkeypatch.setenv("EFFECTIVE_MEMORY_RATE_LIMIT", "0")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:
@@ -188,7 +188,7 @@ def test_rate_limit_disabled_when_zero(monkeypatch, tmp_path):
 def test_healthz_is_unauthenticated(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "healthz_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "topsecret")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:
@@ -211,7 +211,7 @@ def test_config_reports_current_setup(client):
 def test_auth_enforced_when_api_key_set(monkeypatch, tmp_path):
     monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "auth_test.db"))
     monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "topsecret")
-    import effective_memory.api as api
+    from effective_memory import api
 
     importlib.reload(api)
     try:

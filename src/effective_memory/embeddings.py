@@ -13,7 +13,8 @@ import math
 import re
 import threading
 from collections import OrderedDict
-from typing import Callable, Iterable, Optional, Protocol
+from collections.abc import Callable, Iterable
+from typing import Protocol
 
 
 class Embedder(Protocol):
@@ -103,7 +104,7 @@ class VoyageEmbedder:
     `api_key`). Model names change over time; pass one explicitly to pin it.
     """
 
-    def __init__(self, model: str = "voyage-3.5", api_key: Optional[str] = None, dims: int = 1024):
+    def __init__(self, model: str = "voyage-3.5", api_key: str | None = None, dims: int = 1024):
         try:
             import voyageai
         except ImportError as e:
@@ -124,7 +125,7 @@ class OpenAIEmbedder:
     (or an explicit `api_key`).
     """
 
-    def __init__(self, model: str = "text-embedding-3-small", api_key: Optional[str] = None):
+    def __init__(self, model: str = "text-embedding-3-small", api_key: str | None = None):
         try:
             from openai import OpenAI
         except ImportError as e:
@@ -161,7 +162,7 @@ class SentenceTransformerEmbedder:
         return self._model.encode(text, convert_to_numpy=True).tolist()
 
 
-_EMBEDDER_FACTORIES: dict[str, Callable[[Optional[str], Optional[str]], Embedder]] = {
+_EMBEDDER_FACTORIES: dict[str, Callable[[str | None, str | None], Embedder]] = {
     "hashing": lambda model, api_key: HashingEmbedder(),
     "voyage": lambda model, api_key: VoyageEmbedder(model=model or "voyage-3.5", api_key=api_key),
     "openai": lambda model, api_key: OpenAIEmbedder(model=model or "text-embedding-3-small", api_key=api_key),
@@ -171,8 +172,8 @@ _EMBEDDER_FACTORIES: dict[str, Callable[[Optional[str], Optional[str]], Embedder
 
 def get_embedder(
     name: str = "hashing",
-    model: Optional[str] = None,
-    api_key: Optional[str] = None,
+    model: str | None = None,
+    api_key: str | None = None,
     cache_size: int = 256,
 ) -> Embedder:
     """Build an embedder by name: 'hashing' (default, offline), 'voyage',

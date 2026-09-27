@@ -3,12 +3,12 @@ from .embeddings import CachedEmbedder, Embedder, HashingEmbedder, cosine_simila
 from .store import Memory, MemoryStore, RecallResult
 
 __all__ = [
-    "MemoryStore",
-    "Memory",
-    "RecallResult",
+    "CachedEmbedder",
     "Embedder",
     "HashingEmbedder",
-    "CachedEmbedder",
+    "Memory",
+    "MemoryStore",
+    "RecallResult",
     "cosine_similarity",
     "retention",
     "strength",
