@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "effective-memory"
+version = "0.1.0"
+description = "A local-first memory engine: semantic recall for agents, a linkable personal knowledge store, and forgetting-curve-based compaction."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+emem = "effective_memory.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
