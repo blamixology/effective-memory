@@ -1,0 +1,18 @@
+services:
+  effective-memory:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - memory-data:/data
+    environment:
+      # Set a fixed key, or leave unset to have one generated and printed
+      # to the container logs on each start (see `docker compose logs`).
+      - EFFECTIVE_MEMORY_API_KEY=${EFFECTIVE_MEMORY_API_KEY:-}
+      - EFFECTIVE_MEMORY_EMBEDDER=${EFFECTIVE_MEMORY_EMBEDDER:-hashing}
+      - EFFECTIVE_MEMORY_EMBEDDING_MODEL=${EFFECTIVE_MEMORY_EMBEDDING_MODEL:-}
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
+volumes:
+  memory-data:

@@ -7,26 +7,52 @@ Run with:
 or directly:
 
     uvicorn effective_memory.api:app
+
+Configuration (env vars, all optional):
+    EFFECTIVE_MEMORY_DB               path to the SQLite store
+    EFFECTIVE_MEMORY_EMBEDDER         hashing | voyage | openai | sentence-transformers
+    EFFECTIVE_MEMORY_EMBEDDING_MODEL  model name for the chosen embedder
+    EFFECTIVE_MEMORY_API_KEY          required on the "X-API-Key" header for
+                                       every /api/* request; set to "" to
+                                       disable auth (local/dev use only)
 """
 
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Security
 from fastapi.responses import FileResponse
+from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .embeddings import get_embedder
 from .store import Memory, MemoryStore, RecallResult
 
 DB_PATH = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
+EMBEDDER_NAME = os.environ.get("EFFECTIVE_MEMORY_EMBEDDER", "hashing")
+EMBEDDING_MODEL = os.environ.get("EFFECTIVE_MEMORY_EMBEDDING_MODEL")
+API_KEY = os.environ.get("EFFECTIVE_MEMORY_API_KEY")  # unset or "" disables auth
 _STATIC_DIR = Path(__file__).parent / "web"
 
 app = FastAPI(title="effective-memory", description="A local-first memory engine.")
-store = MemoryStore(DB_PATH)
+store = MemoryStore(DB_PATH, embedder=get_embedder(EMBEDDER_NAME, model=EMBEDDING_MODEL))
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+
+def require_api_key(provided: Optional[str] = Security(_api_key_header)) -> None:
+    if not API_KEY:
+        return  # auth disabled
+    if not provided or not secrets.compare_digest(provided, API_KEY):
+        raise HTTPException(status_code=401, detail="missing or invalid X-API-Key header")
+
+
+api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
 
 # -- schemas --------------------------------------------------------------
@@ -78,7 +104,7 @@ def _result_out(r: RecallResult) -> dict:
 # -- API --------------------------------------------------------------------
 
 
-@app.post("/api/memories")
+@api.post("/memories")
 def add_memory(req: AddRequest) -> dict:
     memory_id = store.add(
         req.content, tags=req.tags, source=req.source, importance=req.importance, metadata=req.metadata
@@ -86,7 +112,7 @@ def add_memory(req: AddRequest) -> dict:
     return {"id": memory_id}
 
 
-@app.get("/api/memories/{memory_id}")
+@api.get("/memories/{memory_id}")
 def get_memory(memory_id: int) -> dict:
     memory = store.get(memory_id)
     if memory is None:
@@ -94,41 +120,50 @@ def get_memory(memory_id: int) -> dict:
     return _memory_out(memory)
 
 
-@app.get("/api/memories/{memory_id}/links")
+@api.get("/memories/{memory_id}/links")
 def get_links(memory_id: int) -> list[dict]:
     return [{"relation": rel, "memory": _memory_out(m)} for rel, m in store.links_for(memory_id)]
 
 
-@app.post("/api/links")
+@api.post("/links")
 def add_link(req: LinkRequest) -> dict:
     store.link(req.src_id, req.dst_id, relation=req.relation)
     return {"ok": True}
 
 
-@app.get("/api/recall")
+@api.get("/recall")
 def recall(q: str, k: int = 5) -> list[dict]:
     return [_result_out(r) for r in store.recall(q, k=k)]
 
 
-@app.get("/api/context")
+@api.get("/context")
 def context(q: str, budget: int = 500) -> dict:
     return {"context": store.build_context(q, token_budget=budget)}
 
 
-@app.get("/api/review")
+@api.get("/review")
 def review(threshold: float = 0.3, limit: int = 10) -> list[dict]:
     return [_result_out(r) for r in store.review_due(threshold=threshold, limit=limit)]
 
 
-@app.post("/api/compact")
+@api.post("/compact")
 def compact(req: CompactRequest) -> dict:
     new_ids = store.compact(retention_threshold=req.retention_threshold, cluster_similarity=req.cluster_similarity)
     return {"new_ids": new_ids}
 
 
-@app.get("/api/stats")
+@api.get("/stats")
 def stats() -> dict:
     return store.stats()
+
+
+@api.get("/auth/check")
+def auth_check() -> dict:
+    """Lets the web UI verify a stored key without touching real data."""
+    return {"ok": True}
+
+
+app.include_router(api)
 
 
 # -- static web UI ---------------------------------------------------------

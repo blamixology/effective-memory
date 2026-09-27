@@ -96,20 +96,87 @@ by a JSON API under `/api/*`:
 | GET    | `/api/stats`            | store statistics                      |
 
 The API can also be run directly with `uvicorn effective_memory.api:app`,
-configuring the database via the `EFFECTIVE_MEMORY_DB` env var.
+configured entirely via env vars (`EFFECTIVE_MEMORY_DB`,
+`EFFECTIVE_MEMORY_EMBEDDER`, `EFFECTIVE_MEMORY_EMBEDDING_MODEL`,
+`EFFECTIVE_MEMORY_API_KEY` — see below).
+
+### Auth
+
+Every `/api/*` request requires an `X-API-Key` header matching
+`EFFECTIVE_MEMORY_API_KEY`. `emem serve` auto-generates and prints a key on
+startup if you don't supply one:
+
+```bash
+emem serve --db mem.db                  # prints a generated key
+emem serve --db mem.db --api-key mykey  # pin your own key
+emem serve --db mem.db --no-auth        # disable auth (local/dev only)
+```
+
+The web UI prompts for the key on first use and remembers it in
+`localStorage`. `/` and its static assets stay unauthenticated so the page
+itself can load and prompt; only `/api/*` is protected.
+
+## Real embedding-model backends
+
+By default the store uses a dependency-free hashed-trigram embedder — good
+enough to try things out, but a real embedding model gives much better
+recall. Swap one in with `--embedder` (CLI) or the matching env vars (API):
+
+```bash
+pip install -e ".[dev,voyage]"                 # or [openai] / [sentence-transformers]
+
+emem --embedder voyage add "..."               # needs VOYAGE_API_KEY
+emem --embedder openai recall "..."            # needs OPENAI_API_KEY
+emem --embedder sentence-transformers stats    # fully local, no API key
+```
+
+| `--embedder`             | Backend                          | Needs                          |
+|--------------------------|-----------------------------------|---------------------------------|
+| `hashing` (default)      | dependency-free hashed trigrams   | nothing                         |
+| `voyage`                 | Voyage AI (Anthropic's recommended embeddings provider — Anthropic has no first-party embeddings endpoint) | `voyage` extra, `VOYAGE_API_KEY` |
+| `openai`                 | OpenAI embeddings                 | `openai` extra, `OPENAI_API_KEY` |
+| `sentence-transformers`  | local model, no network at inference time | `sentence-transformers` extra |
+
+Use `--embedding-model` to pick a specific model name for the chosen
+backend. **Use the same embedder consistently for a given `--db`** — vectors
+from different embedders aren't comparable, so switching mid-store silently
+breaks recall for anything added under the old one.
+
+For `emem serve`, set `EFFECTIVE_MEMORY_EMBEDDER` and
+`EFFECTIVE_MEMORY_EMBEDDING_MODEL` instead of the CLI flags.
+
+## Docker
+
+```bash
+docker build -t effective-memory .
+docker run -p 8000:8000 -v emem-data:/data effective-memory
+# or:
+docker compose up
+```
+
+The container persists its SQLite store to the `/data` volume and prints a
+generated API key to the logs on first start unless
+`EFFECTIVE_MEMORY_API_KEY` is set. Pass `VOYAGE_API_KEY` / `OPENAI_API_KEY`
+and `EFFECTIVE_MEMORY_EMBEDDER` as env vars to use a real embedding backend
+in the container.
 
 ## Design
 
 - `embeddings.py` — pluggable `Embedder` protocol; ships a dependency-free
-  `HashingEmbedder` (bag of hashed character trigrams). Swap in a real
-  model by implementing `embed(text) -> list[float]`.
+  `HashingEmbedder` (bag of hashed character trigrams) plus `VoyageEmbedder`,
+  `OpenAIEmbedder`, and `SentenceTransformerEmbedder`, selected via
+  `get_embedder(name, model)`. Swap in any other model by implementing
+  `embed(text) -> list[float]`.
 - `decay.py` — the forgetting-curve math: `retention(elapsed, importance,
   access_count)`.
 - `store.py` — SQLite-backed `MemoryStore`: CRUD, linking, `recall`,
   `build_context`, `review_due`, `compact`, `stats`.
 - `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
-- `api.py` / `web/index.html` — FastAPI REST API and a dependency-free
-  vanilla-JS single-page UI on top of it (optional `web` extra).
+- `api.py` / `web/index.html` — FastAPI REST API (API-key auth on `/api/*`)
+  and a dependency-free vanilla-JS single-page UI on top of it (optional
+  `web` extra).
+- `Dockerfile` / `docker-compose.yml` — containerized `emem serve` with a
+  persistent volume for the SQLite store.
 
 ## Tests
 

@@ -195,6 +195,24 @@ function retentionBar(r) {
   return `<span class="bar"><span style="width:${pct}%;background:${color}"></span></span> ${pct}%`;
 }
 
+let API_KEY = null;
+try { API_KEY = localStorage.getItem('emem_api_key'); } catch (e) {}
+
+async function apiFetch(url, opts = {}) {
+  opts.headers = Object.assign({}, opts.headers, API_KEY ? {'X-API-Key': API_KEY} : {});
+  let res = await fetch(url, opts);
+  if (res.status === 401) {
+    const key = window.prompt('This server requires an API key (printed when it started). Enter it:');
+    if (key) {
+      API_KEY = key;
+      try { localStorage.setItem('emem_api_key', key); } catch (e) {}
+      opts.headers['X-API-Key'] = key;
+      res = await fetch(url, opts);
+    }
+  }
+  return res;
+}
+
 function memCard(mem, extra) {
   const tags = (mem.tags || []).map(t => `<span class="tag">${t}</span>`).join(' ');
   return `<div class="card">
@@ -209,7 +227,7 @@ async function addMemory() {
   const tags = $('add-tags').value.split(',').map(s => s.trim()).filter(Boolean);
   const source = $('add-source').value.trim() || null;
   const importance = parseFloat($('add-importance').value) || 1.0;
-  const res = await fetch('/api/memories', {
+  const res = await apiFetch('/api/memories', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({content, tags, source, importance})
   });
@@ -224,7 +242,7 @@ async function doRecall() {
   const q = $('recall-q').value.trim();
   if (!q) return;
   const k = $('recall-k').value || 5;
-  const res = await fetch(`/api/recall?q=${encodeURIComponent(q)}&k=${k}`);
+  const res = await apiFetch(`/api/recall?q=${encodeURIComponent(q)}&k=${k}`);
   const data = await res.json();
   const out = $('recall-results');
   if (!data.length) { out.innerHTML = '<div class="empty">no memories yet</div>'; return; }
@@ -237,14 +255,14 @@ async function doContext() {
   const q = $('context-q').value.trim();
   if (!q) return;
   const budget = $('context-budget').value || 500;
-  const res = await fetch(`/api/context?q=${encodeURIComponent(q)}&budget=${budget}`);
+  const res = await apiFetch(`/api/context?q=${encodeURIComponent(q)}&budget=${budget}`);
   const data = await res.json();
   $('context-out').textContent = data.context || '(nothing relevant found)';
 }
 
 async function doReview() {
   const threshold = $('review-threshold').value || 0.3;
-  const res = await fetch(`/api/review?threshold=${threshold}`);
+  const res = await apiFetch(`/api/review?threshold=${threshold}`);
   const data = await res.json();
   const out = $('review-results');
   if (!data.length) { out.innerHTML = '<div class="empty">nothing due for review</div>'; return; }
@@ -254,7 +272,7 @@ async function doReview() {
 async function doCompact() {
   const retention_threshold = parseFloat($('compact-threshold').value) || 0.15;
   const cluster_similarity = parseFloat($('compact-similarity').value) || 0.75;
-  const res = await fetch('/api/compact', {
+  const res = await apiFetch('/api/compact', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({retention_threshold, cluster_similarity})
   });
@@ -265,7 +283,7 @@ async function doCompact() {
 }
 
 async function loadStats() {
-  const res = await fetch('/api/stats');
+  const res = await apiFetch('/api/stats');
   const data = await res.json();
   const statuses = Object.entries(data.by_status || {});
   let html = `<div class="stat"><div class="num">${data.total}</div><div class="label">total memories</div></div>`;

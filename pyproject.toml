@@ -14,6 +14,9 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 web = ["fastapi>=0.100", "uvicorn[standard]>=0.23"]
+voyage = ["voyageai>=0.2"]
+openai = ["openai>=1.0"]
+sentence-transformers = ["sentence-transformers>=2.2"]
 
 [project.scripts]
 emem = "effective_memory.cli:main"

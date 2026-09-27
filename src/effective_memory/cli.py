@@ -6,28 +6,41 @@
     emem review [--threshold 0.3] [--limit 10]
     emem compact [--threshold 0.15]
     emem stats
-    emem serve [--host 127.0.0.1] [--port 8000]
+    emem serve [--host 127.0.0.1] [--port 8000] [--api-key KEY | --no-auth]
+
+Add --embedder {hashing,voyage,openai,sentence-transformers} (default:
+hashing) and --embedding-model NAME before the subcommand to use a real
+embedding model instead of the dependency-free default. The same choice
+must be used consistently for a given --db, since vectors from different
+embedders aren't comparable.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
+from .embeddings import get_embedder
 from .store import MemoryStore
 
-DEFAULT_DB = "effective_memory.db"
+DEFAULT_DB = os.environ.get("EFFECTIVE_MEMORY_DB", "effective_memory.db")
+
+
+def _open_store(args: argparse.Namespace) -> MemoryStore:
+    embedder = get_embedder(args.embedder, model=args.embedding_model)
+    return MemoryStore(args.db, embedder=embedder)
 
 
 def _add(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         tags = args.tags.split(",") if args.tags else []
         memory_id = store.add(args.text, tags=tags, source=args.source, importance=args.importance)
         print(f"added memory #{memory_id}")
 
 
 def _recall(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         results = store.recall(args.query, k=args.k)
         if not results:
             print("(no memories yet)")
@@ -37,12 +50,12 @@ def _recall(args: argparse.Namespace) -> None:
 
 
 def _context(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         print(store.build_context(args.query, token_budget=args.budget))
 
 
 def _review(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         due = store.review_due(threshold=args.threshold, limit=args.limit)
         if not due:
             print("nothing due for review")
@@ -52,7 +65,7 @@ def _review(args: argparse.Namespace) -> None:
 
 
 def _compact(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         new_ids = store.compact(retention_threshold=args.threshold)
         if not new_ids:
             print("nothing to compact")
@@ -61,7 +74,7 @@ def _compact(args: argparse.Namespace) -> None:
 
 
 def _stats(args: argparse.Namespace) -> None:
-    with MemoryStore(args.db) as store:
+    with _open_store(args) as store:
         s = store.stats()
         print(f"total: {s['total']}  links: {s['links']}")
         for status, n in s["by_status"].items():
@@ -75,15 +88,39 @@ def _serve(args: argparse.Namespace) -> None:
         print("the web UI/API needs the 'web' extra: pip install 'effective-memory[web]'", file=sys.stderr)
         raise SystemExit(1)
 
-    import os
-
     os.environ["EFFECTIVE_MEMORY_DB"] = args.db
+    os.environ["EFFECTIVE_MEMORY_EMBEDDER"] = args.embedder
+    if args.embedding_model:
+        os.environ["EFFECTIVE_MEMORY_EMBEDDING_MODEL"] = args.embedding_model
+
+    if args.no_auth:
+        os.environ["EFFECTIVE_MEMORY_API_KEY"] = ""
+    elif args.api_key:
+        os.environ["EFFECTIVE_MEMORY_API_KEY"] = args.api_key
+    elif not os.environ.get("EFFECTIVE_MEMORY_API_KEY"):
+        import secrets
+
+        generated = secrets.token_urlsafe(24)
+        os.environ["EFFECTIVE_MEMORY_API_KEY"] = generated
+        print(f"generated API key (pass it as 'X-API-Key' header, or --api-key next time): {generated}")
+
     uvicorn.run("effective_memory.api:app", host=args.host, port=args.port)
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--db", default=DEFAULT_DB, help="path to the SQLite store")
+    parser.add_argument(
+        "--embedder",
+        default="hashing",
+        choices=["hashing", "voyage", "openai", "sentence-transformers"],
+        help="embedding backend (default: hashing, dependency-free)",
+    )
+    parser.add_argument("--embedding-model", default=None, help="model name for the chosen embedder")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="emem", description="A local-first memory engine.")
-    parser.add_argument("--db", default=DEFAULT_DB, help="path to the SQLite store")
+    _add_common_args(parser)
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_add = sub.add_parser("add", help="store a new memory")
@@ -118,6 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     p_serve = sub.add_parser("serve", help="run the web UI + REST API (requires the 'web' extra)")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.add_argument("--api-key", default=None, help="require this key on the 'X-API-Key' header")
+    p_serve.add_argument("--no-auth", action="store_true", help="disable API key auth (local/dev use only)")
     p_serve.set_defaults(func=_serve)
 
     args = parser.parse_args(argv)

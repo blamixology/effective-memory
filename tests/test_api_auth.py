@@ -1,0 +1,43 @@
+import importlib
+
+import pytest
+from fastapi import HTTPException
+
+
+@pytest.fixture
+def api_module(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "auth_test.db"))
+    monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "expected-key")
+    import effective_memory.api as api
+
+    importlib.reload(api)
+    yield api
+    api.store.close()
+
+
+def test_missing_key_rejected(api_module):
+    with pytest.raises(HTTPException) as exc:
+        api_module.require_api_key(None)
+    assert exc.value.status_code == 401
+
+
+def test_wrong_key_rejected(api_module):
+    with pytest.raises(HTTPException) as exc:
+        api_module.require_api_key("wrong-key")
+    assert exc.value.status_code == 401
+
+
+def test_correct_key_accepted(api_module):
+    api_module.require_api_key("expected-key")  # should not raise
+
+
+def test_auth_disabled_when_key_unset(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "noauth_test.db"))
+    monkeypatch.delenv("EFFECTIVE_MEMORY_API_KEY", raising=False)
+    import effective_memory.api as api
+
+    importlib.reload(api)
+    try:
+        api.require_api_key(None)  # should not raise -- auth disabled
+    finally:
+        api.store.close()
