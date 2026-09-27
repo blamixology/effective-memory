@@ -55,6 +55,32 @@ def test_compact_removes_originals_from_vector_index(store, clock):
     assert ids == set(new_ids)
 
 
+def test_keyword_supplement_finds_match_the_ann_pool_would_miss(clock):
+    class BiasedEmbedder:
+        """Makes 'noise' documents look identical to the query, and the
+        real target look completely dissimilar -- so with a tiny overfetch,
+        pure ANN search would never surface the target. Only the keyword
+        supplement (matching the literal query term in its content) can.
+        """
+
+        dims = 4
+
+        def embed(self, text):
+            if text.startswith("random noise"):
+                return [1.0, 0.0, 0.0, 0.0]
+            return [0.0, 0.0, 1.0, 0.0]
+
+    with MemoryStore(
+        ":memory:", embedder=BiasedEmbedder(), clock=clock, vector_index=True, vector_index_overfetch=1
+    ) as store:
+        for i in range(3):
+            store.add(f"random noise memory number {i}")
+        target_id = store.add("the secret token XYZ123 was issued")
+
+        results = store.recall("random noise XYZ123", k=5, touch_on_recall=False)
+        assert target_id in {r.memory.id for r in results}
+
+
 def test_existing_store_backfills_index_when_enabled_later(tmp_path):
     db_path = str(tmp_path / "backfill.db")
     with MemoryStore(db_path) as s:

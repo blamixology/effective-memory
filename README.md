@@ -2,9 +2,9 @@
 
 A local-first memory engine that is, at the same time:
 
-- **agent memory** — semantic `recall()` and `build_context()` retrieve the
-  most relevant, least-forgotten memories to inject into an LLM prompt
-  under a token budget.
+- **agent memory** — hybrid semantic + keyword `recall()` and
+  `build_context()` retrieve the most relevant, least-forgotten memories to
+  inject into an LLM prompt under a token budget.
 - **a personal knowledge base** — `add()` stores notes with tags and
   metadata, `link()` connects related memories into a small knowledge
   graph, and `review_due()` surfaces things worth revisiting.
@@ -112,6 +112,7 @@ under `/api/*`:
 | POST   | `/api/import?reset=false` | load a JSON dump, re-embedding every memory |
 | POST   | `/api/reindex`          | re-embed every memory with the current embedder |
 | GET    | `/api/config`           | active embedder, dims, vector-index and auth state |
+| GET    | `/healthz`              | unauthenticated liveness/readiness probe |
 
 The UI has seven tabs:
 
@@ -140,17 +141,31 @@ configured entirely via env vars (`EFFECTIVE_MEMORY_DB`,
 
 Every `/api/*` request requires an `X-API-Key` header matching
 `EFFECTIVE_MEMORY_API_KEY`. `emem serve` auto-generates and prints a key on
-startup if you don't supply one:
+startup only if the env var was never set at all; an *explicitly* empty
+value (as `docker-compose.yml` passes by default -- see Docker below) is
+treated as "auth intentionally disabled" and left alone, not overridden:
 
 ```bash
-emem serve --db mem.db                  # prints a generated key
-emem serve --db mem.db --api-key mykey  # pin your own key
-emem serve --db mem.db --no-auth        # disable auth (local/dev only)
+emem serve --db mem.db                          # nothing set -> prints a generated key
+emem serve --db mem.db --api-key mykey          # pin your own key
+emem serve --db mem.db --no-auth                # disable auth (local/dev only)
+EFFECTIVE_MEMORY_API_KEY= emem serve --db mem.db  # explicit empty -> disabled too
 ```
 
 The web UI prompts for the key on first use and remembers it in
-`localStorage`. `/` and its static assets stay unauthenticated so the page
-itself can load and prompt; only `/api/*` is protected.
+`localStorage`. `/`, its static assets, and `/healthz` stay unauthenticated
+so the page can load and prompt, and orchestrators can probe liveness
+without a key; everything under `/api/*` is protected.
+
+### Input limits
+
+`/api/*` bounds the obvious abuse/mistake vectors on a service that's now
+network-reachable rather than always local-only: memory `content` is capped
+at 20,000 characters, `k`/`limit`/`offset`/`budget` have sane min/max
+ranges, and `compact()`'s thresholds are clamped to their valid `[0, 1]`
+(or `[-1, 1]` for cosine similarity) ranges. Out-of-range values return
+`422` rather than being silently clamped or allowed to run unbounded
+queries.
 
 ## Real embedding-model backends
 
@@ -223,6 +238,18 @@ already has data triggers a one-time backfill on open. The embedding
 dimension is fixed at index-creation time, so this inherits the existing
 "pick one embedder per `--db`" rule.
 
+## Hybrid recall
+
+`recall()` blends two signals: decay-weighted semantic similarity (the
+primary driver) plus a small bonus when the memory's content contains the
+query's own words verbatim. This matters most with the default hashing
+embedder, whose similarity signal is crude enough that an exact name, ID,
+or term you typed can otherwise rank below something merely "semantically
+close." With `--vector-index` enabled, an exact match that the embedder
+scores as dissimilar could fall outside the ANN candidate pool at very
+large scale; a small, `LIMIT`-bounded keyword lookup supplements the pool
+to catch the common case, though it isn't exhaustive at scale.
+
 ## Backup, restore, and embedder migration
 
 `export_data()`/`import_data()` (Python), `emem export`/`emem import`
@@ -250,11 +277,19 @@ docker run -p 8000:8000 -v emem-data:/data effective-memory
 docker compose up
 ```
 
-The container persists its SQLite store to the `/data` volume and prints a
-generated API key to the logs on first start unless
-`EFFECTIVE_MEMORY_API_KEY` is set. Pass `VOYAGE_API_KEY` / `OPENAI_API_KEY`
-and `EFFECTIVE_MEMORY_EMBEDDER` as env vars to use a real embedding backend
-in the container.
+The container persists its SQLite store to the `/data` volume. By default
+`docker-compose.yml` passes `EFFECTIVE_MEMORY_API_KEY` through as an
+explicitly empty value when unset on the host, which this image treats as
+"auth disabled" (see Auth above) -- set a real key in your shell or a
+`.env` file before exposing this beyond localhost. Pass `VOYAGE_API_KEY` /
+`OPENAI_API_KEY` and `EFFECTIVE_MEMORY_EMBEDDER` as env vars to use a real
+embedding backend in the container. `GET /healthz` backs both the
+Dockerfile's `HEALTHCHECK` and the compose file's `healthcheck:` block.
+
+Actually build-and-run verified (not just reviewed): `docker build`,
+`docker run`, `docker inspect --format '{{json .State.Health}}'` reporting
+`"healthy"`, and a full add/recall/stats/healthz smoke test against the
+running container, all passing.
 
 ## Design
 
@@ -286,6 +321,10 @@ in the container.
 pip install -e ".[dev,web]"   # httpx2 + fastapi needed for the API integration tests
 pytest -q
 ```
+
+Coverage includes the store (`test_store.py`), the CLI end-to-end via
+`cli.main([...])` (`test_cli.py`), and the REST API end-to-end via FastAPI's
+`TestClient` (`test_api.py`) -- not just manual curl/CLI smoke tests.
 
 CI (`.github/workflows/ci.yml`) runs the suite on Python 3.10-3.12 on every
 push and PR. Tests for optional extras (voyage/openai/sentence-transformers/

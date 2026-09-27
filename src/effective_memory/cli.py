@@ -190,7 +190,10 @@ def _serve(args: argparse.Namespace) -> None:
         os.environ["EFFECTIVE_MEMORY_API_KEY"] = ""
     elif args.api_key:
         os.environ["EFFECTIVE_MEMORY_API_KEY"] = args.api_key
-    elif not os.environ.get("EFFECTIVE_MEMORY_API_KEY"):
+    elif os.environ.get("EFFECTIVE_MEMORY_API_KEY") is None:
+        # only generate one when the env var was never set at all -- an
+        # explicitly empty value (e.g. from docker-compose) means "no auth"
+        # and must be left alone, not silently overridden
         import secrets
 
         generated = secrets.token_urlsafe(24)

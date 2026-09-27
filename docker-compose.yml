@@ -6,13 +6,21 @@ services:
     volumes:
       - memory-data:/data
     environment:
-      # Set a fixed key, or leave unset to have one generated and printed
-      # to the container logs on each start (see `docker compose logs`).
+      # Set EFFECTIVE_MEMORY_API_KEY on the host to require that key on
+      # every /api/* request. Left unset (the default here), docker-compose
+      # still passes it through as an explicitly empty value, which this
+      # image treats as "auth disabled" -- fine for a local/trusted network,
+      # but set a real key before exposing this beyond localhost.
       - EFFECTIVE_MEMORY_API_KEY=${EFFECTIVE_MEMORY_API_KEY:-}
       - EFFECTIVE_MEMORY_EMBEDDER=${EFFECTIVE_MEMORY_EMBEDDER:-hashing}
       - EFFECTIVE_MEMORY_EMBEDDING_MODEL=${EFFECTIVE_MEMORY_EMBEDDING_MODEL:-}
       - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/healthz', timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
 
 volumes:
   memory-data:

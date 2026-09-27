@@ -14,6 +14,7 @@ One store serves three roles at once:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -87,6 +88,30 @@ def _row_to_memory(row: sqlite3.Row) -> Memory:
         access_count=row["access_count"],
         status=row["status"],
     )
+
+
+# Hybrid recall: a small additive bonus for exact/substring keyword matches,
+# so a query that names something verbatim (an ID, a name, a term) doesn't
+# get outranked by something merely "semantically close" -- most noticeable
+# with the default hashing embedder, whose similarity signal is crude.
+KEYWORD_BONUS_WEIGHT = 0.2
+KEYWORD_SUPPLEMENT_LIMIT = 20
+
+
+def _query_tokens(query: str) -> list[str]:
+    seen = []
+    for tok in re.findall(r"[a-z0-9]+", query.lower()):
+        if len(tok) >= 3 and tok not in seen:
+            seen.append(tok)
+    return seen
+
+
+def _keyword_score(tokens: list[str], content: str) -> float:
+    if not tokens:
+        return 0.0
+    content_lower = content.lower()
+    hits = sum(1 for tok in tokens if tok in content_lower)
+    return hits / len(tokens)
 
 
 class MemoryStore:
@@ -292,39 +317,61 @@ class MemoryStore:
             return self._conn.execute("SELECT * FROM memories WHERE status != 'compacted'").fetchall()
         return self._conn.execute("SELECT * FROM memories WHERE status = 'active'").fetchall()
 
-    def _score(self, row: sqlite3.Row, sim: float, now: float) -> RecallResult:
+    def _score(self, row: sqlite3.Row, sim: float, now: float, query_tokens: list[str] = ()) -> RecallResult:
         elapsed = now - row["last_accessed"]
         ret = retention(elapsed, row["importance"], row["access_count"], self.half_life)
         # never fully zero out a strong semantic match just because it decayed
-        score = sim * (0.3 + 0.7 * ret)
+        semantic = sim * (0.3 + 0.7 * ret)
+        keyword = _keyword_score(query_tokens, row["content"])
+        score = semantic + KEYWORD_BONUS_WEIGHT * keyword
         return RecallResult(memory=_row_to_memory(row), similarity=sim, retention=ret, score=score)
 
-    def _recall_brute_force(self, query_vec: list[float], k: int, now: float, include_archived: bool) -> list[RecallResult]:
+    def _recall_brute_force(
+        self, query_vec: list[float], k: int, now: float, include_archived: bool, query_tokens: list[str]
+    ) -> list[RecallResult]:
         results = []
         for row in self._active_rows(include_archived):
             sim = cosine_similarity(query_vec, json.loads(row["embedding"]))
-            results.append(self._score(row, sim, now))
+            results.append(self._score(row, sim, now, query_tokens))
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:k]
 
-    def _recall_via_vector_index(self, query_vec: list[float], k: int, now: float) -> list[RecallResult]:
+    def _recall_via_vector_index(
+        self, query_vec: list[float], k: int, now: float, query_tokens: list[str]
+    ) -> list[RecallResult]:
         """Overfetch a candidate pool by raw cosine similarity from the ANN
         index, then re-rank that (much smaller) pool by decay-weighted
         score in Python. This avoids scanning every row for large stores,
         at the cost of only ever re-ranking within the top `overfetch`
-        candidates by pure similarity.
+        candidates by pure similarity -- an exact keyword match that the
+        embedder scores as dissimilar could still be missed at very large
+        scale. `query_tokens` mitigates the common case with a small,
+        LIMIT-bounded supplemental lookup (see below), but isn't exhaustive.
         """
         overfetch = max(k, self._vector_index_overfetch)
         candidates = self._vector_index.search(query_vec, limit=overfetch)
-        if not candidates:
-            return []
         similarities = dict(candidates)
+
+        if query_tokens:
+            clauses = " OR ".join(["content LIKE ?"] * len(query_tokens))
+            params = [f"%{tok}%" for tok in query_tokens]
+            exclude = list(similarities) or [-1]
+            placeholders = ",".join("?" * len(exclude))
+            for row in self._conn.execute(
+                f"SELECT id, embedding FROM memories WHERE status = 'active' "
+                f"AND id NOT IN ({placeholders}) AND ({clauses}) LIMIT {KEYWORD_SUPPLEMENT_LIMIT}",
+                exclude + params,
+            ):
+                similarities[row["id"]] = cosine_similarity(query_vec, json.loads(row["embedding"]))
+
+        if not similarities:
+            return []
         placeholders = ",".join("?" * len(similarities))
         rows = self._conn.execute(
             f"SELECT * FROM memories WHERE id IN ({placeholders}) AND status = 'active'",
             list(similarities),
         ).fetchall()
-        results = [self._score(row, similarities[row["id"]], now) for row in rows]
+        results = [self._score(row, similarities[row["id"]], now, query_tokens) for row in rows]
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:k]
 
@@ -335,16 +382,19 @@ class MemoryStore:
         include_archived: bool = False,
         touch_on_recall: bool = True,
     ) -> list[RecallResult]:
-        """Return the top-k memories relevant to `query`, ranked by
-        similarity weighted by how well-retained the memory currently is.
+        """Return the top-k memories relevant to `query`, ranked by a hybrid
+        score: semantic similarity weighted by how well-retained the memory
+        currently is, plus a small bonus when the memory's content contains
+        the query's own words verbatim.
         """
         with self._lock:
             query_vec = self.embedder.embed(query)
+            query_tokens = _query_tokens(query)
             now = self._clock()
             if self._vector_index is not None and not include_archived:
-                top = self._recall_via_vector_index(query_vec, k, now)
+                top = self._recall_via_vector_index(query_vec, k, now, query_tokens)
             else:
-                top = self._recall_brute_force(query_vec, k, now, include_archived)
+                top = self._recall_brute_force(query_vec, k, now, include_archived, query_tokens)
             if touch_on_recall:
                 for r in top:
                     self.touch(r.memory.id)

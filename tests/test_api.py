@@ -83,6 +83,22 @@ def test_links(client):
     assert links[0]["memory"]["id"] == b
 
 
+def test_input_limits_are_enforced(client):
+    assert client.post("/api/memories", json={"content": ""}).status_code == 422
+    assert client.post("/api/memories", json={"content": "x" * 20_001}).status_code == 422
+    assert client.post("/api/memories", json={"content": "ok", "importance": 1000}).status_code == 422
+
+    client.post("/api/memories", json={"content": "a fact"})
+    assert client.get("/api/recall", params={"q": "a", "k": 0}).status_code == 422
+    assert client.get("/api/recall", params={"q": "a", "k": 1000}).status_code == 422
+    assert client.get("/api/memories", params={"limit": 0}).status_code == 422
+    assert client.get("/api/memories", params={"limit": 501}).status_code == 422
+    assert client.get("/api/memories", params={"offset": -1}).status_code == 422
+
+    res = client.post("/api/compact", json={"retention_threshold": 1.5})
+    assert res.status_code == 422
+
+
 def test_compact_rejects_unknown_summarizer(client):
     res = client.post("/api/compact", json={"summarizer": "not-a-real-summarizer"})
     assert res.status_code == 400
@@ -125,6 +141,21 @@ def test_reindex_endpoint(client):
     res = client.post("/api/reindex")
     assert res.status_code == 200
     assert res.json() == {"reindexed": 1}
+
+
+def test_healthz_is_unauthenticated(monkeypatch, tmp_path):
+    monkeypatch.setenv("EFFECTIVE_MEMORY_DB", str(tmp_path / "healthz_test.db"))
+    monkeypatch.setenv("EFFECTIVE_MEMORY_API_KEY", "topsecret")
+    import effective_memory.api as api
+
+    importlib.reload(api)
+    try:
+        with TestClient(api.app) as c:
+            res = c.get("/healthz")
+            assert res.status_code == 200
+            assert res.json() == {"status": "ok"}
+    finally:
+        api.store.close()
 
 
 def test_config_reports_current_setup(client):

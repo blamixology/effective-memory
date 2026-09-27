@@ -27,11 +27,13 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Security
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Security
 from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+MAX_CONTENT_LENGTH = 20_000
 
 from .embeddings import get_embedder
 from .store import Memory, MemoryStore, RecallResult
@@ -52,6 +54,14 @@ store = MemoryStore(
     vector_index_overfetch=VECTOR_INDEX_OVERFETCH,
 )
 
+
+@app.get("/healthz")
+def healthz() -> dict:
+    """Unauthenticated liveness/readiness probe for container orchestrators."""
+    store.stats()  # touches the DB connection so a broken store fails the check
+    return {"status": "ok"}
+
+
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
@@ -69,30 +79,30 @@ api = APIRouter(prefix="/api", dependencies=[Depends(require_api_key)])
 
 
 class AddRequest(BaseModel):
-    content: str
-    tags: list[str] = []
-    source: Optional[str] = None
-    importance: float = 1.0
+    content: str = Field(..., min_length=1, max_length=MAX_CONTENT_LENGTH)
+    tags: list[str] = Field(default=[], max_length=100)
+    source: Optional[str] = Field(None, max_length=200)
+    importance: float = Field(1.0, ge=0.0, le=100.0)
     metadata: dict = {}
 
 
 class UpdateRequest(BaseModel):
-    content: Optional[str] = None
-    tags: Optional[list[str]] = None
-    source: Optional[str] = None
-    importance: Optional[float] = None
+    content: Optional[str] = Field(None, min_length=1, max_length=MAX_CONTENT_LENGTH)
+    tags: Optional[list[str]] = Field(None, max_length=100)
+    source: Optional[str] = Field(None, max_length=200)
+    importance: Optional[float] = Field(None, ge=0.0, le=100.0)
     metadata: Optional[dict] = None
 
 
 class LinkRequest(BaseModel):
     src_id: int
     dst_id: int
-    relation: str = "related"
+    relation: str = Field("related", min_length=1, max_length=100)
 
 
 class CompactRequest(BaseModel):
-    retention_threshold: float = 0.15
-    cluster_similarity: float = 0.75
+    retention_threshold: float = Field(0.15, ge=0.0, le=1.0)
+    cluster_similarity: float = Field(0.75, ge=-1.0, le=1.0)
     summarizer: str = "none"  # "none" or "claude"
     summarizer_model: Optional[str] = None
 
@@ -139,7 +149,12 @@ def add_memory(req: AddRequest) -> dict:
 
 
 @api.get("/memories")
-def list_memories(status: Optional[str] = None, tag: Optional[str] = None, limit: int = 50, offset: int = 0) -> dict:
+def list_memories(
+    status: Optional[str] = None,
+    tag: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict:
     items = store.list_memories(status=status, tag=tag, limit=limit, offset=offset)
     total = store.count_memories(status=status, tag=tag)
     return {"items": [_memory_out(m) for m in items], "total": total, "limit": limit, "offset": offset}
@@ -188,17 +203,20 @@ def add_link(req: LinkRequest) -> dict:
 
 
 @api.get("/recall")
-def recall(q: str, k: int = 5) -> list[dict]:
+def recall(q: str = Query(..., min_length=1, max_length=MAX_CONTENT_LENGTH), k: int = Query(5, ge=1, le=100)) -> list[dict]:
     return [_result_out(r) for r in store.recall(q, k=k)]
 
 
 @api.get("/context")
-def context(q: str, budget: int = 500) -> dict:
+def context(
+    q: str = Query(..., min_length=1, max_length=MAX_CONTENT_LENGTH),
+    budget: int = Query(500, ge=1, le=50_000),
+) -> dict:
     return {"context": store.build_context(q, token_budget=budget)}
 
 
 @api.get("/review")
-def review(threshold: float = 0.3, limit: int = 10) -> list[dict]:
+def review(threshold: float = Query(0.3, ge=0.0, le=1.0), limit: int = Query(10, ge=1, le=500)) -> list[dict]:
     return [_result_out(r) for r in store.review_due(threshold=threshold, limit=limit)]
 
 

@@ -42,6 +42,38 @@ def test_recall_ranks_relevant_memory_first(store):
     assert results[0].memory.content.startswith("the user prefers dark mode")
 
 
+class ConstantEmbedder:
+    """Every text maps to the same vector -- isolates the keyword bonus from
+    any real semantic signal, since cosine similarity is identical for all
+    memories regardless of content.
+    """
+
+    dims = 4
+
+    def embed(self, text):
+        return [1.0, 0.0, 0.0, 0.0]
+
+
+def test_recall_keyword_bonus_breaks_semantic_ties():
+    with MemoryStore(":memory:", embedder=ConstantEmbedder()) as store:
+        store.add("a totally unrelated sentence")
+        store.add("the ticket PROJ-4471 was resolved yesterday")
+        results = store.recall("PROJ-4471 status", k=2, touch_on_recall=False)
+        assert results[0].memory.content.startswith("the ticket PROJ-4471")
+
+
+def test_keyword_score_and_tokens_helpers():
+    from effective_memory.store import _keyword_score, _query_tokens
+
+    tokens = _query_tokens("What is PROJ-4471's status?")
+    assert "proj" in tokens and "4471" in tokens
+    assert "is" not in tokens  # short stopword-like tokens are dropped
+
+    assert _keyword_score(tokens, "the PROJ-4471 ticket") > 0
+    assert _keyword_score(tokens, "completely unrelated") == 0
+    assert _keyword_score([], "anything") == 0.0
+
+
 def test_recall_strengthens_memory(store, clock):
     mid = store.add("remember this important fact")
     before = store.get(mid)
