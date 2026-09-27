@@ -159,3 +159,52 @@ def test_delete_cascades_links(store):
     store.link(a, b, relation="knows")
     store.delete(a)
     assert store.stats()["links"] == 0
+
+
+def test_list_memories_most_recent_first(store, clock):
+    a = store.add("first")
+    clock.advance(60)
+    b = store.add("second")
+    clock.advance(60)
+    c = store.add("third")
+    ids = [m.id for m in store.list_memories()]
+    assert ids == [c, b, a]
+
+
+def test_list_memories_filters_by_status(store, clock):
+    store.add("the user likes coffee in the morning")
+    store.add("the user prefers coffee at breakfast")
+    clock.advance(120 * 24 * 3600)
+    new_ids = store.compact(retention_threshold=0.99, cluster_similarity=0.3)
+
+    active = store.list_memories(status="active")
+    compacted = store.list_memories(status="compacted")
+    everything = store.list_memories(status="all")
+    assert [m.id for m in active] == new_ids
+    assert len(compacted) == 2
+    assert len(everything) == 3
+
+
+def test_list_memories_filters_by_tag(store):
+    store.add("tagged one", tags=["work"])
+    store.add("tagged two", tags=["personal"])
+    results = store.list_memories(tag="work")
+    assert len(results) == 1
+    assert results[0].content == "tagged one"
+
+
+def test_list_memories_pagination(store):
+    for i in range(5):
+        store.add(f"memory {i}")
+    page1 = store.list_memories(limit=2, offset=0)
+    page2 = store.list_memories(limit=2, offset=2)
+    assert len(page1) == 2
+    assert len(page2) == 2
+    assert {m.id for m in page1}.isdisjoint({m.id for m in page2})
+
+
+def test_count_memories(store):
+    store.add("a", tags=["x"])
+    store.add("b")
+    assert store.count_memories() == 2
+    assert store.count_memories(tag="x") == 1

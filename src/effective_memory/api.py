@@ -132,6 +132,13 @@ def add_memory(req: AddRequest) -> dict:
     return {"id": memory_id}
 
 
+@api.get("/memories")
+def list_memories(status: Optional[str] = None, tag: Optional[str] = None, limit: int = 50, offset: int = 0) -> dict:
+    items = store.list_memories(status=status, tag=tag, limit=limit, offset=offset)
+    total = store.count_memories(status=status, tag=tag)
+    return {"items": [_memory_out(m) for m in items], "total": total, "limit": limit, "offset": offset}
+
+
 @api.get("/memories/{memory_id}")
 def get_memory(memory_id: int) -> dict:
     memory = store.get(memory_id)
@@ -213,6 +220,19 @@ def compact(req: CompactRequest) -> dict:
 @api.get("/stats")
 def stats() -> dict:
     return store.stats()
+
+
+@api.get("/config")
+def config() -> dict:
+    return {
+        "db_path": DB_PATH,
+        "embedder": EMBEDDER_NAME,
+        "embedding_model": EMBEDDING_MODEL,
+        "embedding_dims": store.embedder.dims,
+        "vector_index": VECTOR_INDEX,
+        "vector_index_overfetch": VECTOR_INDEX_OVERFETCH if VECTOR_INDEX else None,
+        "auth_enabled": bool(API_KEY),
+    }
 
 
 @api.get("/auth/check")

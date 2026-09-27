@@ -73,6 +73,7 @@ emem recall "what theme does the user like"
 emem context "summarize what I know about the user" --budget 300
 emem review --threshold 0.3
 emem compact --threshold 0.15
+emem list --status active --tag preference
 emem stats
 ```
 
@@ -85,13 +86,13 @@ in the current directory).
 emem serve --db mem.db --port 8000
 ```
 
-Open `http://127.0.0.1:8000` for a small browser UI (add notes, recall,
-build a context block, review due memories, compact, and see stats), backed
-by a JSON API under `/api/*`:
+Open `http://127.0.0.1:8000` for a small browser UI, backed by a JSON API
+under `/api/*`:
 
 | Method | Path                    | Purpose                              |
 |--------|-------------------------|---------------------------------------|
 | POST   | `/api/memories`         | add a memory                          |
+| GET    | `/api/memories?status=active&tag=...&limit=50&offset=0` | browse memories, paginated |
 | GET    | `/api/memories/{id}`    | fetch one memory                      |
 | PATCH  | `/api/memories/{id}`    | edit a memory (re-embeds if `content` changes) |
 | DELETE | `/api/memories/{id}`    | delete a memory                       |
@@ -102,9 +103,21 @@ by a JSON API under `/api/*`:
 | GET    | `/api/review?threshold=0.3` | spaced-repetition review queue    |
 | POST   | `/api/compact`          | cluster + summarize decayed memories (`summarizer: "none"\|"claude"`) |
 | GET    | `/api/stats`            | store statistics                      |
+| GET    | `/api/config`           | active embedder, dims, vector-index and auth state |
 
-The web UI's **Manage** tab covers editing/deleting a memory by ID, and
-every recall/review card has a delete (✕) button.
+The UI has seven tabs:
+
+- **Browse** (the default tab) — paginated list of every memory,
+  filterable by status (`active`/`compacted`/`all`) and tag. A compacted
+  summary shows which original memories it was built from.
+- **Add** / **Recall** / **Context** / **Review** / **Compact** — as before.
+- **Manage** — load a memory by ID to edit or delete it, and see/add its
+  outgoing links (the knowledge-graph side of the tool, otherwise only
+  reachable via the API).
+- **Stats** — counts plus a **Configuration** panel (DB path, embedder +
+  model, embedding dimensions, vector-index state, auth state).
+
+Every card everywhere (Browse, Recall, Review) has a delete (✕) button.
 
 The API can also be run directly with `uvicorn effective_memory.api:app`,
 configured entirely via env vars (`EFFECTIVE_MEMORY_DB`,

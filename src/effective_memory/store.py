@@ -253,6 +253,40 @@ class MemoryStore:
             row = self._conn.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
             return _row_to_memory(row) if row else None
 
+    def _list_filters(self, status: Optional[str], tag: Optional[str]) -> tuple[str, list]:
+        clauses, params = [], []
+        if status and status != "all":
+            clauses.append("status = ?")
+            params.append(status)
+        if tag:
+            clauses.append("tags LIKE ?")
+            params.append(f'%"{tag}"%')
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        return where, params
+
+    def list_memories(
+        self,
+        status: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[Memory]:
+        """Browse memories most-recent-first. `status` is 'active',
+        'compacted', or None/'all' for everything.
+        """
+        with self._lock:
+            where, params = self._list_filters(status, tag)
+            rows = self._conn.execute(
+                f"SELECT * FROM memories{where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            ).fetchall()
+            return [_row_to_memory(row) for row in rows]
+
+    def count_memories(self, status: Optional[str] = None, tag: Optional[str] = None) -> int:
+        with self._lock:
+            where, params = self._list_filters(status, tag)
+            return self._conn.execute(f"SELECT COUNT(*) FROM memories{where}", params).fetchone()[0]
+
     def _active_rows(self, include_archived: bool = False) -> list[sqlite3.Row]:
         if include_archived:
             return self._conn.execute("SELECT * FROM memories WHERE status != 'compacted'").fetchall()

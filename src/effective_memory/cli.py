@@ -5,6 +5,7 @@
     emem context "query" [--budget 500]
     emem update ID [--content ...] [--tags a,b] [--source name] [--importance 1.0]
     emem delete ID
+    emem list [--status active|compacted|all] [--tag TAG] [--limit 50] [--offset 0]
     emem review [--threshold 0.3] [--limit 10]
     emem compact [--threshold 0.15] [--summarizer none|claude] [--summarizer-model NAME]
     emem stats
@@ -67,6 +68,18 @@ def _delete(args: argparse.Namespace) -> None:
     with _open_store(args) as store:
         store.delete(args.id)
         print(f"deleted memory #{args.id}")
+
+
+def _list(args: argparse.Namespace) -> None:
+    with _open_store(args) as store:
+        items = store.list_memories(status=args.status, tag=args.tag, limit=args.limit, offset=args.offset)
+        total = store.count_memories(status=args.status, tag=args.tag)
+        if not items:
+            print("(no memories match)")
+            return
+        for m in items:
+            print(f"(#{m.id}, {m.status}) {m.content}")
+        print(f"-- {args.offset + len(items)}/{total} --")
 
 
 def _recall(args: argparse.Namespace) -> None:
@@ -191,6 +204,13 @@ def main(argv: list[str] | None = None) -> int:
     p_delete = sub.add_parser("delete", help="delete a memory")
     p_delete.add_argument("id", type=int)
     p_delete.set_defaults(func=_delete)
+
+    p_list = sub.add_parser("list", help="browse memories (most recent first)")
+    p_list.add_argument("--status", default=None, choices=["active", "compacted", "all"])
+    p_list.add_argument("--tag", default=None)
+    p_list.add_argument("--limit", type=int, default=50)
+    p_list.add_argument("--offset", type=int, default=0)
+    p_list.set_defaults(func=_list)
 
     p_recall = sub.add_parser("recall", help="semantically search memories")
     p_recall.add_argument("query")

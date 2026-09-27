@@ -72,6 +72,7 @@
     font-size: 14px;
   }
   button.action:hover { opacity: 0.9; }
+  button.action:disabled { opacity: 0.35; cursor: not-allowed; }
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -93,6 +94,15 @@
     padding: 1px 6px;
     font-size: 11px;
   }
+  .badge {
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .badge.active { background: rgba(76, 175, 125, 0.15); color: var(--good); }
+  .badge.compacted { background: rgba(224, 166, 60, 0.15); color: var(--warn); }
   .bar {
     width: 60px; height: 5px; border-radius: 3px; background: var(--border);
     display: inline-block; overflow: hidden; vertical-align: middle;
@@ -118,7 +128,8 @@
   <div class="sub">agent memory · knowledge base · decay-based compaction</div>
 </header>
 <nav>
-  <button data-panel="add" class="active">Add</button>
+  <button data-panel="browse" class="active">Browse</button>
+  <button data-panel="add">Add</button>
   <button data-panel="recall">Recall</button>
   <button data-panel="context">Context</button>
   <button data-panel="review">Review</button>
@@ -128,7 +139,25 @@
 </nav>
 <main>
 
-  <section class="panel active" id="panel-add">
+  <section class="panel active" id="panel-browse">
+    <div class="row">
+      <select id="browse-status" style="background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 10px">
+        <option value="active">active</option>
+        <option value="compacted">compacted</option>
+        <option value="all">all</option>
+      </select>
+      <input type="text" id="browse-tag" placeholder="filter by tag" style="max-width:180px" />
+      <button class="action" onclick="browseMemories(0)">Refresh</button>
+    </div>
+    <div id="browse-results"></div>
+    <div class="row" id="browse-pager" style="display:none;align-items:center">
+      <button class="action" id="browse-prev" onclick="browsePage(-1)">&larr; Prev</button>
+      <span class="empty" id="browse-count" style="padding:0"></span>
+      <button class="action" id="browse-next" onclick="browsePage(1)">Next &rarr;</button>
+    </div>
+  </section>
+
+  <section class="panel" id="panel-add">
     <textarea id="add-content" placeholder="What do you want to remember?"></textarea>
     <div class="row" style="margin-top:8px">
       <input type="text" id="add-tags" placeholder="tags (comma separated)" />
@@ -182,6 +211,15 @@
         <button class="action" onclick="saveMemory()">Save changes</button>
         <button class="action" style="background:#e05c5c" onclick="deleteMemoryById()">Delete</button>
       </div>
+      <div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+        <div class="sub" style="margin-bottom:8px">Links from this memory</div>
+        <div id="manage-links"></div>
+        <div class="row">
+          <input type="number" id="manage-link-target" placeholder="target memory ID" style="width:160px" />
+          <input type="text" id="manage-link-relation" placeholder="relation (e.g. related)" style="max-width:200px" />
+          <button class="action" onclick="addLink()">Add link</button>
+        </div>
+      </div>
     </div>
     <div id="manage-result" class="empty"></div>
   </section>
@@ -206,6 +244,8 @@
 
   <section class="panel" id="panel-stats">
     <div class="stat-grid" id="stats-out"></div>
+    <div class="sub" style="margin:20px 0 8px">Configuration</div>
+    <div id="config-out"></div>
   </section>
 
 </main>
@@ -219,8 +259,12 @@ document.querySelectorAll('nav button').forEach(btn => {
     btn.classList.add('active');
     $('panel-' + btn.dataset.panel).classList.add('active');
     if (btn.dataset.panel === 'stats') loadStats();
+    if (btn.dataset.panel === 'browse') browseMemories(0);
   });
 });
+
+// load the Browse tab on first page load too, since it's the default tab
+window.addEventListener('DOMContentLoaded', () => browseMemories(0));
 
 function retentionBar(r) {
   const pct = Math.round(r * 100);
@@ -259,7 +303,51 @@ function memCard(mem, extra) {
 async function deleteCard(id, btn) {
   if (!window.confirm(`Delete memory #${id}?`)) return;
   const res = await apiFetch(`/api/memories/${id}`, {method: 'DELETE'});
-  if (res.ok) btn.closest('.card').remove();
+  if (!res.ok) return;
+  const inBrowse = btn.closest('#panel-browse');
+  if (inBrowse) {
+    browseMemories(browseOffset);
+  } else {
+    btn.closest('.card').remove();
+  }
+}
+
+let browseOffset = 0;
+const BROWSE_PAGE_SIZE = 20;
+
+function statusBadge(status) {
+  return `<span class="badge ${status}">${status}</span>`;
+}
+
+async function browseMemories(offset) {
+  browseOffset = Math.max(0, offset);
+  const status = $('browse-status').value;
+  const tag = $('browse-tag').value.trim();
+  const params = new URLSearchParams({status, limit: BROWSE_PAGE_SIZE, offset: browseOffset});
+  if (tag) params.set('tag', tag);
+  const res = await apiFetch(`/api/memories?${params}`);
+  const data = await res.json();
+  const out = $('browse-results');
+  if (!data.items.length) {
+    out.innerHTML = '<div class="empty">no memories match</div>';
+    $('browse-pager').style.display = 'none';
+    return;
+  }
+  out.innerHTML = data.items.map(mem => {
+    const compactedFrom = mem.metadata && mem.metadata.compacted_from;
+    const note = compactedFrom ? `compacted from #${compactedFrom.join(', #')}` : '';
+    const date = new Date(mem.created_at * 1000).toLocaleDateString();
+    return memCard(mem, `${statusBadge(mem.status)} ${date} ${note}`);
+  }).join('');
+
+  $('browse-pager').style.display = 'flex';
+  $('browse-prev').disabled = browseOffset === 0;
+  $('browse-next').disabled = browseOffset + data.items.length >= data.total;
+  $('browse-count').textContent = `${browseOffset + 1}-${browseOffset + data.items.length} of ${data.total}`;
+}
+
+function browsePage(direction) {
+  browseMemories(browseOffset + direction * BROWSE_PAGE_SIZE);
 }
 
 async function addMemory() {
@@ -345,6 +433,33 @@ async function loadMemory() {
   $('manage-importance').value = mem.importance;
   $('manage-form').style.display = 'block';
   $('manage-result').textContent = '';
+  loadLinks(id);
+}
+
+async function loadLinks(id) {
+  const res = await apiFetch(`/api/memories/${id}/links`);
+  const out = $('manage-links');
+  if (!res.ok) { out.innerHTML = ''; return; }
+  const links = await res.json();
+  out.innerHTML = links.length
+    ? links.map(l => `<div class="card"><div class="meta">
+        <span class="tag">${l.relation}</span> &rarr; #${l.memory.id} ${l.memory.content}
+      </div></div>`).join('')
+    : '<div class="empty" style="padding:8px 0">no links yet</div>';
+}
+
+async function addLink() {
+  const id = $('manage-id').value;
+  const target = $('manage-link-target').value;
+  const relation = $('manage-link-relation').value.trim() || 'related';
+  if (!id || !target) return;
+  await apiFetch('/api/links', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({src_id: parseInt(id), dst_id: parseInt(target), relation})
+  });
+  $('manage-link-target').value = '';
+  $('manage-link-relation').value = '';
+  loadLinks(id);
 }
 
 async function saveMemory() {
@@ -378,6 +493,20 @@ async function loadStats() {
     html += `<div class="stat"><div class="num">${n}</div><div class="label">${status}</div></div>`;
   }
   $('stats-out').innerHTML = html;
+
+  const cfgRes = await apiFetch('/api/config');
+  if (!cfgRes.ok) { $('config-out').innerHTML = ''; return; }
+  const cfg = await cfgRes.json();
+  const rows = [
+    ['database', cfg.db_path],
+    ['embedder', cfg.embedding_model ? `${cfg.embedder} (${cfg.embedding_model})` : cfg.embedder],
+    ['embedding dimensions', cfg.embedding_dims],
+    ['vector index', cfg.vector_index ? `on (overfetch ${cfg.vector_index_overfetch})` : 'off'],
+    ['auth', cfg.auth_enabled ? 'enabled' : 'disabled'],
+  ];
+  $('config-out').innerHTML = `<div class="card">${rows.map(([k, v]) =>
+    `<div class="meta" style="justify-content:space-between"><span>${k}</span><span>${v}</span></div>`
+  ).join('')}</div>`;
 }
 </script>
 </body>
