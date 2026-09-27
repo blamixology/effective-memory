@@ -13,9 +13,13 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+web = ["fastapi>=0.100", "uvicorn[standard]>=0.23"]
 
 [project.scripts]
 emem = "effective_memory.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+effective_memory = ["web/*.html"]

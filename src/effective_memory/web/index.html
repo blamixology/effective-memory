@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>effective-memory</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2e37;
+    --text: #e6e8eb;
+    --muted: #8b909c;
+    --accent: #6ea8fe;
+    --good: #4caf7d;
+    --warn: #e0a63c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 20px 24px 0;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+  nav {
+    display: flex;
+    gap: 4px;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 24px;
+    border-bottom: 1px solid var(--border);
+  }
+  nav button {
+    background: none;
+    border: none;
+    color: var(--muted);
+    padding: 10px 14px;
+    font-size: 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+  }
+  nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+  main { max-width: 900px; margin: 0 auto; padding: 20px 24px 60px; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
+  input[type=text], input[type=number], textarea {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+    font-size: 14px;
+  }
+  input[type=text] { flex: 1; min-width: 200px; }
+  textarea { width: 100%; min-height: 70px; resize: vertical; font-family: inherit; }
+  button.action {
+    background: var(--accent);
+    color: #0f1115;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 14px;
+  }
+  button.action:hover { opacity: 0.9; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+  }
+  .card .content { font-size: 14px; margin-bottom: 6px; }
+  .card .meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+  .tag {
+    background: rgba(110, 168, 254, 0.15);
+    color: var(--accent);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 11px;
+  }
+  .bar {
+    width: 60px; height: 5px; border-radius: 3px; background: var(--border);
+    display: inline-block; overflow: hidden; vertical-align: middle;
+  }
+  .bar > span { display: block; height: 100%; background: var(--good); }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 0; }
+  .stat-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+  .stat {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 120px;
+  }
+  .stat .num { font-size: 26px; font-weight: 700; }
+  .stat .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  pre#context-out {
+    white-space: pre-wrap; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 14px; font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>effective-memory</h1>
+  <div class="sub">agent memory · knowledge base · decay-based compaction</div>
+</header>
+<nav>
+  <button data-panel="add" class="active">Add</button>
+  <button data-panel="recall">Recall</button>
+  <button data-panel="context">Context</button>
+  <button data-panel="review">Review</button>
+  <button data-panel="compact">Compact</button>
+  <button data-panel="stats">Stats</button>
+</nav>
+<main>
+
+  <section class="panel active" id="panel-add">
+    <textarea id="add-content" placeholder="What do you want to remember?"></textarea>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="add-tags" placeholder="tags (comma separated)" />
+      <input type="text" id="add-source" placeholder="source (optional)" />
+      <input type="number" id="add-importance" placeholder="importance" value="1.0" step="0.1" style="width:110px" />
+      <button class="action" onclick="addMemory()">Add memory</button>
+    </div>
+    <div id="add-result" class="empty"></div>
+  </section>
+
+  <section class="panel" id="panel-recall">
+    <div class="row">
+      <input type="text" id="recall-q" placeholder="search your memories..." onkeydown="if(event.key==='Enter')doRecall()"/>
+      <input type="number" id="recall-k" value="5" style="width:70px" />
+      <button class="action" onclick="doRecall()">Recall</button>
+    </div>
+    <div id="recall-results"></div>
+  </section>
+
+  <section class="panel" id="panel-context">
+    <div class="row">
+      <input type="text" id="context-q" placeholder="query to build an LLM context block for..." onkeydown="if(event.key==='Enter')doContext()"/>
+      <input type="number" id="context-budget" value="500" style="width:100px" />
+      <button class="action" onclick="doContext()">Build context</button>
+    </div>
+    <pre id="context-out"></pre>
+  </section>
+
+  <section class="panel" id="panel-review">
+    <div class="row">
+      <label style="align-self:center;color:var(--muted);font-size:13px">retention below</label>
+      <input type="number" id="review-threshold" value="0.3" step="0.05" style="width:90px" />
+      <button class="action" onclick="doReview()">Show due</button>
+    </div>
+    <div id="review-results"></div>
+  </section>
+
+  <section class="panel" id="panel-compact">
+    <div class="row">
+      <label style="align-self:center;color:var(--muted);font-size:13px">retention threshold</label>
+      <input type="number" id="compact-threshold" value="0.15" step="0.05" style="width:90px" />
+      <label style="align-self:center;color:var(--muted);font-size:13px">cluster similarity</label>
+      <input type="number" id="compact-similarity" value="0.75" step="0.05" style="width:90px" />
+      <button class="action" onclick="doCompact()">Compact now</button>
+    </div>
+    <div id="compact-result" class="empty"></div>
+  </section>
+
+  <section class="panel" id="panel-stats">
+    <div class="stat-grid" id="stats-out"></div>
+  </section>
+
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+document.querySelectorAll('nav button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('panel-' + btn.dataset.panel).classList.add('active');
+    if (btn.dataset.panel === 'stats') loadStats();
+  });
+});
+
+function retentionBar(r) {
+  const pct = Math.round(r * 100);
+  const color = r > 0.6 ? 'var(--good)' : (r > 0.3 ? 'var(--warn)' : '#e05c5c');
+  return `<span class="bar"><span style="width:${pct}%;background:${color}"></span></span> ${pct}%`;
+}
+
+function memCard(mem, extra) {
+  const tags = (mem.tags || []).map(t => `<span class="tag">${t}</span>`).join(' ');
+  return `<div class="card">
+    <div class="content">#${mem.id} ${mem.content}</div>
+    <div class="meta">${tags} ${extra || ''}</div>
+  </div>`;
+}
+
+async function addMemory() {
+  const content = $('add-content').value.trim();
+  if (!content) return;
+  const tags = $('add-tags').value.split(',').map(s => s.trim()).filter(Boolean);
+  const source = $('add-source').value.trim() || null;
+  const importance = parseFloat($('add-importance').value) || 1.0;
+  const res = await fetch('/api/memories', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content, tags, source, importance})
+  });
+  const data = await res.json();
+  $('add-result').textContent = `saved as memory #${data.id}`;
+  $('add-content').value = '';
+  $('add-tags').value = '';
+  $('add-source').value = '';
+}
+
+async function doRecall() {
+  const q = $('recall-q').value.trim();
+  if (!q) return;
+  const k = $('recall-k').value || 5;
+  const res = await fetch(`/api/recall?q=${encodeURIComponent(q)}&k=${k}`);
+  const data = await res.json();
+  const out = $('recall-results');
+  if (!data.length) { out.innerHTML = '<div class="empty">no memories yet</div>'; return; }
+  out.innerHTML = data.map(r =>
+    memCard(r.memory, `score ${r.score.toFixed(3)} &nbsp; ${retentionBar(r.retention)}`)
+  ).join('');
+}
+
+async function doContext() {
+  const q = $('context-q').value.trim();
+  if (!q) return;
+  const budget = $('context-budget').value || 500;
+  const res = await fetch(`/api/context?q=${encodeURIComponent(q)}&budget=${budget}`);
+  const data = await res.json();
+  $('context-out').textContent = data.context || '(nothing relevant found)';
+}
+
+async function doReview() {
+  const threshold = $('review-threshold').value || 0.3;
+  const res = await fetch(`/api/review?threshold=${threshold}`);
+  const data = await res.json();
+  const out = $('review-results');
+  if (!data.length) { out.innerHTML = '<div class="empty">nothing due for review</div>'; return; }
+  out.innerHTML = data.map(r => memCard(r.memory, retentionBar(r.retention))).join('');
+}
+
+async function doCompact() {
+  const retention_threshold = parseFloat($('compact-threshold').value) || 0.15;
+  const cluster_similarity = parseFloat($('compact-similarity').value) || 0.75;
+  const res = await fetch('/api/compact', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({retention_threshold, cluster_similarity})
+  });
+  const data = await res.json();
+  $('compact-result').textContent = data.new_ids.length
+    ? `compacted into ${data.new_ids.length} summary memories: ${data.new_ids.join(', ')}`
+    : 'nothing to compact';
+}
+
+async function loadStats() {
+  const res = await fetch('/api/stats');
+  const data = await res.json();
+  const statuses = Object.entries(data.by_status || {});
+  let html = `<div class="stat"><div class="num">${data.total}</div><div class="label">total memories</div></div>`;
+  html += `<div class="stat"><div class="num">${data.links}</div><div class="label">links</div></div>`;
+  for (const [status, n] of statuses) {
+    html += `<div class="stat"><div class="num">${n}</div><div class="label">${status}</div></div>`;
+  }
+  $('stats-out').innerHTML = html;
+}
+</script>
+</body>
+</html>

@@ -6,6 +6,7 @@
     emem review [--threshold 0.3] [--limit 10]
     emem compact [--threshold 0.15]
     emem stats
+    emem serve [--host 127.0.0.1] [--port 8000]
 """
 
 from __future__ import annotations
@@ -67,6 +68,19 @@ def _stats(args: argparse.Namespace) -> None:
             print(f"  {status}: {n}")
 
 
+def _serve(args: argparse.Namespace) -> None:
+    try:
+        import uvicorn
+    except ImportError:
+        print("the web UI/API needs the 'web' extra: pip install 'effective-memory[web]'", file=sys.stderr)
+        raise SystemExit(1)
+
+    import os
+
+    os.environ["EFFECTIVE_MEMORY_DB"] = args.db
+    uvicorn.run("effective_memory.api:app", host=args.host, port=args.port)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="emem", description="A local-first memory engine.")
     parser.add_argument("--db", default=DEFAULT_DB, help="path to the SQLite store")
@@ -100,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
 
     p_stats = sub.add_parser("stats", help="show store statistics")
     p_stats.set_defaults(func=_stats)
+
+    p_serve = sub.add_parser("serve", help="run the web UI + REST API (requires the 'web' extra)")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8000)
+    p_serve.set_defaults(func=_serve)
 
     args = parser.parse_args(argv)
     args.func(args)

@@ -30,7 +30,8 @@ summarizer.
 ## Install
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"        # core + tests
+pip install -e ".[dev,web]"    # + REST API and web UI
 ```
 
 ## Python API
@@ -72,6 +73,31 @@ emem stats
 All commands take `--db path/to/store.db` (defaults to `effective_memory.db`
 in the current directory).
 
+## Web UI + REST API
+
+```bash
+emem serve --db mem.db --port 8000
+```
+
+Open `http://127.0.0.1:8000` for a small browser UI (add notes, recall,
+build a context block, review due memories, compact, and see stats), backed
+by a JSON API under `/api/*`:
+
+| Method | Path                    | Purpose                              |
+|--------|-------------------------|---------------------------------------|
+| POST   | `/api/memories`         | add a memory                          |
+| GET    | `/api/memories/{id}`    | fetch one memory                      |
+| GET    | `/api/memories/{id}/links` | list its links                     |
+| POST   | `/api/links`            | link two memories                     |
+| GET    | `/api/recall?q=...&k=5` | semantic recall                       |
+| GET    | `/api/context?q=...&budget=500` | build an LLM-ready context block |
+| GET    | `/api/review?threshold=0.3` | spaced-repetition review queue    |
+| POST   | `/api/compact`          | cluster + summarize decayed memories  |
+| GET    | `/api/stats`            | store statistics                      |
+
+The API can also be run directly with `uvicorn effective_memory.api:app`,
+configuring the database via the `EFFECTIVE_MEMORY_DB` env var.
+
 ## Design
 
 - `embeddings.py` — pluggable `Embedder` protocol; ships a dependency-free
@@ -81,7 +107,9 @@ in the current directory).
   access_count)`.
 - `store.py` — SQLite-backed `MemoryStore`: CRUD, linking, `recall`,
   `build_context`, `review_due`, `compact`, `stats`.
-- `cli.py` — thin argparse wrapper over `MemoryStore`.
+- `cli.py` — thin argparse wrapper over `MemoryStore`, plus `emem serve`.
+- `api.py` / `web/index.html` — FastAPI REST API and a dependency-free
+  vanilla-JS single-page UI on top of it (optional `web` extra).
 
 ## Tests
 
